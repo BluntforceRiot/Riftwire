@@ -36,7 +36,7 @@ hermes mcp add riftwire --command $python --args @riftwireArgs
 
 On a Unix peer use the `hermes-config peer` output. If the existing route uses an SSH agent socket, ensure it is reachable from the Hermes MCP process. Hermes filters the environment of stdio subprocesses. An explicit `IdentityAgent` setting in the peer’s OpenSSH config can point it at the existing socket. [Hermes stdio environment](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp#stdio-env-filtering)
 
-Run `hermes mcp test riftwire` under the same profile. Start a chat or run `/reload-mcp` and ask Hermes to use Riftwire’s `contacts` tool. Its result registers the profile and shows its address, such as `hub/hermes`. The other tools are `send`, `inbox`, `ack`, and `receipt`.
+Run `hermes mcp test riftwire` under the same profile. Start a chat or run `/reload-mcp` and ask Hermes to use Riftwire’s `contacts` tool. Its default result registers the profile and shows its address, such as `hub/hermes`. Hermes can also search the [local friends list](SETUP.md#local-friends-list) and put a chat at the top with `set_favorite`. The messaging tools are `send`, `inbox`, `ack`, and `receipt`.
 
 ## Send and verify
 

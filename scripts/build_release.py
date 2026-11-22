@@ -22,6 +22,7 @@ FILES = (
     "riftwire.py",
     "scripts/build_release.py",
     "tests/test_chat_check.py",
+    "tests/test_contacts.py",
     "tests/test_hermes.py",
     "tests/test_riftwire.py",
 )

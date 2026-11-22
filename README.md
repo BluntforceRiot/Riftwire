@@ -2,7 +2,7 @@
 
 # Riftwire
 
-**Riftwire connects Codex chats working in local projects on two computers.** Send a message from a project chat on your laptop to a project chat on your desktop and see when it’s read. Address a chat by its link or nickname.
+**Riftwire connects Codex chats working in local projects on two computers.** In a nod to ICQ, each chat’s thread ID is its “number.” Find chats by title in your local friends list, send a message, and see when it’s read. Use a chat link or nickname to reach a project on your paired computer.
 
 Each computer uses the Codex account signed in there. The accounts can be the same or different. Riftwire connects the machines over SSH, uses its own mailbox, and works independently of any memory system. Hermes Agent can join the same connection.
 
@@ -22,13 +22,15 @@ Register Riftwire as a local MCP server in a Hermes profile on either computer. 
 
 | What you want | What to tell Codex |
 | --- | --- |
+| Find a chat on this computer | “Search my local Riftwire contacts for Planning.” |
+| Keep a favorite at the top | “Add this chat to my Riftwire favorites.” |
 | Send to a specific chat | “Send ‘The build passed’ with Riftwire to this chat.” Paste its `codex://threads/…` link. |
 | Give a chat a nickname | “Give this chat the Riftwire alias `review` and the shared title `Build review`.” |
 | Read and acknowledge | “Read my Riftwire inbox and acknowledge the message about the build.” |
 | Check a handoff | “Check the read receipt for the message I just sent.” |
 | Keep a Codex chat quiet | “Turn off Riftwire wake on message for this chat.” |
 
-A chat link works on the first send. A short alias or unique shared title works once its owner enrolls it. The contacts list contains only chats introduced to Riftwire.
+The friends list refreshes from Codex when you open it. New chats appear once saved, renames keep the same thread ID, and archived chats drop out of discovery. The list is local to your computer. Enroll a chat under a shared alias to list it on the paired computer. A chat link also works on the first send. [Local friends list and sharing](docs/SETUP.md#local-friends-list)
 
 ## How delivery works
 

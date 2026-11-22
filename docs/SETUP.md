@@ -52,6 +52,14 @@ From the hub chat run `python3 -I -B riftwire.py verify-chat hub --wait 120`. On
 
 The peer sends a unique greeting. The hub reads and acknowledges that greeting, then returns a digest of what it read. The peer verifies and acknowledges the reply. `passed` requires each destination's native queue to accept a notice and each recipient to acknowledge the correct text. The receipts carry message UUIDs and Unix timestamps in seconds. The test touches only its own two message bodies. An invitation expires after 30 minutes. Its messages and their receipts stay in the mailbox.
 
+## Local friends list
+
+Ask Codex or Hermes to “Show my Riftwire friends list on this PC,” or call `contacts` with `{"local_only":true,"search":"Planning"}`. The `local_chats` list includes each chat’s title, folder name and stable `host/UUID` address. Search also matches folder names and IDs. For a long list, use `local_next_offset` as the next `offset` with the same search term.
+
+Riftwire looks up the local Codex profile’s saved, unarchived interactive chats each time. It uses Codex 0.171.0 or later for discovery. Call `set_favorite` with a chat’s `thread_id` and `favorite: true` to put it at the top on this computer. Use `favorite: false` to remove it from favorites.
+
+Opening the list keeps titles and folder names on this computer. To advertise a chat to the paired computer, enroll it under an alias with `share: true` and an optional shared title. Call `enroll` with the same alias and `share: false` to hide the contact from the remote list and title lookup. Known links and addresses can still receive messages. On the peer, local discovery works even when the hub is offline. Delivery still uses the hub connection.
+
 ## Daily use and troubleshooting
 
 - **Address a chat.** Use `host/alias` on either computer or `host/UUID` for a Codex chat without an alias. An unqualified link, UUID, alias, or exact shared title routes to the other computer. For a local deep link use `host/codex://threads/<UUID>`. Use `contacts` to see the actual host names and addresses.
