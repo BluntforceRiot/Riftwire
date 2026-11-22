@@ -1,9 +1,11 @@
+import argparse
 import concurrent.futures
 import contextlib
 import io
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -145,7 +147,6 @@ class MailboxTests(unittest.TestCase):
     def test_notice_contains_routing_metadata_only(self):
         self.send_direct()
         job = self.hub.claim("workstation")
-        import subprocess
         completed = subprocess.CompletedProcess([], 0, stdout=b"accepted", stderr=b"")
         with patch.object(rw.subprocess, "run", return_value=completed) as run:
             self.assertEqual(rw.queue_notice(job, "/fixture/codex", "/fixture/codex-home")[0], "queued")
@@ -212,6 +213,108 @@ class MailboxTests(unittest.TestCase):
             rw.ssh_args({**cfg,"target":"-other"},"rpc","send")
         with self.assertRaises(ValueError):
             rw.ssh_args(cfg,"rpc","other")
+
+    def test_storage_limit_rejects_growth_and_keeps_existing_history(self):
+        path = self.path.parent / "small-mailbox.sqlite3"
+        with contextlib.closing(sqlite3.connect(path)) as db:
+            db.execute("PRAGMA page_size = 1024")
+            db.execute("VACUUM")
+        box = rw.Mailbox(path, "hub", self.hub.hosts)
+        box.enroll("build", self.origin)
+        saved = box.send("build", self.target, "Keep this message.")
+        with box.connection() as db:
+            pages = db.execute("PRAGMA page_count").fetchone()[0]
+        with patch.object(rw, "MAX_MAILBOX_BYTES", pages * 1024):
+            peer = rw.Mailbox(path, "peer", self.hub.hosts)
+            self.assertEqual(box.send("build", self.target, "Keep this message.", saved["id"]), saved)
+            with self.assertRaisesRegex(ValueError, "mailbox or its filesystem is full"):
+                box.send("build", self.target, "a" * rw.MAX_BODY)
+            messages = rw.invoke(peer, "inbox", {}, self.target)["messages"]
+            self.assertEqual([m["id"] for m in messages], [saved["id"]])
+            self.assertEqual(path.stat().st_size, pages * 1024)
+
+    def test_peer_limit_is_shared_by_addresses_and_allows_idempotent_retries(self):
+        self.peer.enroll("review", self.target)
+        self.peer.enroll("second", uid())
+        with (patch.object(rw, "MAX_PEER_MESSAGES_PER_MINUTE", 1),
+              patch.object(rw, "timestamp", return_value=1000) as clock,
+              patch.object(rw, "queue_notice", return_value=("queued", "Codex accepted")) as notice):
+            first = self.peer.send("review", "laptop/build", "Ready.")
+            self.assertEqual(self.peer.send("review", "laptop/build", "Ready.", first["id"]), first)
+            with self.assertRaisesRegex(ValueError, "message rate limit"):
+                self.peer.send("second", "laptop/build", "Another update.")
+            notice.assert_called_once()
+            clock.return_value += 60
+            self.assertEqual(self.peer.send("second", "laptop/build", "Another update.")["notice"], "queued")
+
+    def test_explicit_pin_disables_other_host_key_sources_and_connection_reuse(self):
+        pin = self.path.parent / "pins 100%.txt"
+        pin.write_text("")
+        cfg = {"target": "my-alias", "ssh_program": "ssh", "known_hosts": str(pin)}
+        for mode, tool in (("check", None), ("pickup", None), ("notices", None),
+                           ("rpc", "send"), ("rpc-hermes", "send")):
+            args = rw.ssh_args(cfg, mode, tool)
+            for option in ("StrictHostKeyChecking=yes", "ControlPath=none",
+                           "GlobalKnownHostsFile=none", "KnownHostsCommand=none",
+                           "VerifyHostKeyDNS=no", "UpdateHostKeys=no"):
+                self.assertIn(option, args)
+            self.assertEqual([arg for arg in args if arg.startswith("UserKnownHostsFile=")],
+                             ['UserKnownHostsFile="' + pin.as_posix().replace("%", "%%") + '"'])
+        with self.assertRaisesRegex(ValueError, "unavailable"):
+            rw.ssh_args({**cfg, "known_hosts": str(pin.with_name("missing"))}, "check")
+
+
+class PeerUpgradeTests(unittest.TestCase):
+    def setUp(self):
+        sandbox = tempfile.TemporaryDirectory()
+        self.addCleanup(sandbox.cleanup)
+        self.folder = Path(sandbox.name)
+        self.identity = self.folder / "peer.key"
+        self.pin = self.folder / "hub.pin"
+        for path in (self.identity, self.pin):
+            path.write_text("")
+        self.hosts = {"hub": "hub", "peer": "peer"}
+        settings = {"target": "fixture", "identity": str(self.identity), "known_hosts": str(self.pin),
+                    "hosts": self.hosts}
+        (self.folder / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+
+    def install(self, **options):
+        args = argparse.Namespace(codex=None, mode="install-peer", ssh="fixture",
+                                  **{"identity": None, "known_hosts": None, **options})
+        completed = subprocess.CompletedProcess([], 0, stdout=b"--thread --message --resume", stderr=b"")
+        with (patch.object(rw, "peer_dir", return_value=self.folder),
+              patch.object(rw, "codex_path", return_value="fixture-codex"),
+              patch.object(rw.subprocess, "run", return_value=completed),
+              patch.object(rw.shutil, "which", return_value="fixture-ssh"),
+              patch.object(rw, "peer_call", return_value={"service": "riftwire", "version": 1,
+                                                          "role": "peer", "hosts": self.hosts}) as probe,
+              patch.object(rw, "register") as register,
+              patch.object(rw, "pickup_notices", return_value=0) as pickup,
+              contextlib.redirect_stdout(io.StringIO())):
+            self.probe = probe
+            rw.install(args)
+        candidate = probe.call_args.args[0]
+        register.assert_called_once_with(self.folder, candidate, ["mcp-peer"])
+        pickup.assert_called_once_with(candidate)
+        return candidate
+
+    def test_upgrade_reuses_files_before_contacting_the_hub(self):
+        checked = self.install()
+        self.assertEqual(checked["identity"], str(self.identity.resolve()))
+        self.assertEqual(checked["known_hosts"], str(self.pin.resolve()))
+
+    def test_new_key_path_replaces_just_the_key(self):
+        rotated = self.folder / "replacement.key"
+        rotated.write_text("")
+        checked = self.install(identity=str(rotated))
+        self.assertEqual(checked["identity"], str(rotated.resolve()))
+        self.assertEqual(checked["known_hosts"], str(self.pin.resolve()))
+
+    def test_missing_saved_pin_fails_before_connecting(self):
+        self.pin.unlink()
+        with self.assertRaisesRegex(ValueError, "--known-hosts"):
+            self.install()
+        self.probe.assert_not_called()
 
 
 if __name__ == "__main__":

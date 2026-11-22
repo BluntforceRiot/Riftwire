@@ -21,9 +21,11 @@ DATA = Path.home() / ".local" / "share" / "riftwire"
 REMOTE_SCRIPT = "~/.local/share/riftwire/riftwire.py"
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,39}\Z")
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 LEASE = 120
 MAX_BODY = 8192
+MAX_MAILBOX_BYTES = 64 * 1024 * 1024
+MAX_PEER_MESSAGES_PER_MINUTE = 30
 TEST_LIFETIME = 1800
 QUEUE_ACCEPTED = ("queued", "queued_with_warning")
 PEER_CORRESPONDENCE = (
@@ -107,7 +109,7 @@ class Mailbox:
         self.codex_home = codex_home
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self.connection() as db:
+        with self.connection(limit_growth=False) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     address TEXT PRIMARY KEY, host TEXT NOT NULL, thread TEXT NOT NULL,
@@ -126,6 +128,7 @@ class Mailbox:
                     code TEXT PRIMARY KEY, hub_thread TEXT NOT NULL, peer_thread TEXT,
                     created INTEGER NOT NULL, expires INTEGER NOT NULL, finished INTEGER);
                 CREATE INDEX IF NOT EXISTS inbox_seq ON messages(recipient, seq);
+                CREATE INDEX IF NOT EXISTS messages_created ON messages(created);
             """)
             if not self.has_client_column(db):
                 db.execute("BEGIN IMMEDIATE")
@@ -137,12 +140,20 @@ class Mailbox:
         return any(row["name"] == "client" for row in db.execute("PRAGMA table_info(contacts)"))
 
     @contextmanager
-    def connection(self):
+    def connection(self, *, limit_growth=True):
         with closing(sqlite3.connect(self.path, timeout=8)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
-            with db:
-                yield db
+            if limit_growth:
+                page_size = db.execute("PRAGMA page_size").fetchone()[0]
+                db.execute(f"PRAGMA max_page_count = {MAX_MAILBOX_BYTES // page_size}").fetchone()
+            try:
+                with db:
+                    yield db
+            except sqlite3.Error as exc:
+                if getattr(exc, "sqlite_errorname", None) == "SQLITE_FULL" or str(exc) == "database or disk is full":
+                    raise ValueError("The Riftwire mailbox or its filesystem is full. Existing mail is retained.") from exc
+                raise
 
     def enroll(self, alias, thread_id, wake=None, title=None):
         local = address(self.side, alias)
@@ -277,9 +288,17 @@ class Mailbox:
             else:
                 if not db.execute("SELECT 1 FROM contacts WHERE address=?", (local,)).fetchone():
                     raise ValueError("Choose an enrolled sender or use the native Codex MCP thread context.")
+                created = timestamp()
+                if self.side == self.hosts["peer"]:
+                    recent = db.execute("""SELECT count(*) FROM (
+                        SELECT 1 FROM messages m JOIN contacts c ON c.address=m.sender
+                        WHERE m.created>? AND c.host=? LIMIT ?
+                    )""", (created - 60, self.side, MAX_PEER_MESSAGES_PER_MINUTE)).fetchone()[0]
+                    if recent >= MAX_PEER_MESSAGES_PER_MINUTE:
+                        raise ValueError("The SSH peer reached its message rate limit. Try again in a minute.")
                 notice = "inbox_only" if recipient["client"] == "hermes" else "pending"
                 db.execute("INSERT INTO messages (id,sender,recipient,body,created,notice) VALUES (?,?,?,?,?,?)",
-                           (mid, local, to, text, timestamp(), notice))
+                           (mid, local, to, text, created, notice))
         if recipient["host"] == self.hosts["hub"] and recipient["client"] == "codex":
             job = self.claim(recipient["host"], mid)
             if job:
@@ -651,12 +670,21 @@ def ssh_args(settings, mode, name=None):
             "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
             "-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes"]
     if settings.get("identity"):
-        args += ["-o", "IdentitiesOnly=yes", "-i", settings["identity"]]
+        identity = Path(settings["identity"])
+        if not identity.is_absolute() or not identity.is_file():
+            raise ValueError("The saved SSH identity file is unavailable.")
+        args += ["-o", "IdentitiesOnly=yes", "-i", str(identity)]
     if settings.get("known_hosts"):
-        known = Path(settings["known_hosts"]).as_posix()
-        if '"' in known or '\n' in known:
-            raise ValueError("Invalid known_hosts path.")
-        args += ["-o", f'UserKnownHostsFile="{known}"']
+        pin = Path(settings["known_hosts"])
+        if not pin.is_absolute() or not pin.is_file():
+            raise ValueError("The saved SSH pin file is unavailable.")
+        known = pin.as_posix().replace("%", "%%")
+        if any(part in known for part in ('"', "\r", "\n", '${')):
+            raise ValueError("Invalid SSH pin file path.")
+        # An existing OpenSSH control socket would skip host key verification.
+        args += ["-o", "ControlPath=none", "-o", "GlobalKnownHostsFile=none",
+                 "-o", "KnownHostsCommand=none", "-o", "VerifyHostKeyDNS=no",
+                 "-o", "UpdateHostKeys=no", "-o", f'UserKnownHostsFile="{known}"']
     target = settings["target"]
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.@-]*", target):
         raise ValueError("Use a concrete SSH config alias or user@host.")
@@ -752,11 +780,20 @@ def install(args):
     ssh = shutil.which("ssh.exe" if os.name == "nt" else "ssh")
     if not ssh:
         raise ValueError("OpenSSH client was not found.")
+    folder = peer_dir()
+    previous = read_settings(folder) if (folder / "settings.json").exists() else {}
+    if previous and previous.get("target") != args.ssh:
+        raise ValueError("A different SSH target is already configured in this installation.")
     settings = {"target": args.ssh, "ssh_program": ssh, **codex_settings}
-    for arg in ("identity", "known_hosts"):
-        value = getattr(args, arg)
-        if value:
-            settings[arg] = str(Path(value).expanduser().resolve(strict=True))
+    for option in ("identity", "known_hosts"):
+        supplied = getattr(args, option)
+        value = previous.get(option) if supplied is None else supplied
+        if value is not None:
+            path = Path(value).expanduser().resolve()
+            if not path.is_file():
+                flag = option.replace("_", "-")
+                raise ValueError(f"The SSH file for --{flag} is unavailable. Supply a verified replacement.")
+            settings[option] = str(path)
     checked = peer_call(settings, "check")
     if checked.get("service") != "riftwire" or checked.get("version") != 1 or checked.get("role") != "peer":
         raise ValueError("The SSH host did not return the expected Riftwire endpoint.")
@@ -766,7 +803,7 @@ def install(args):
             or hosts["hub"] == hosts["peer"]):
         raise ValueError("The SSH endpoint returned an invalid host pair.")
     settings["hosts"] = hosts
-    register(peer_dir(), settings, ["mcp-peer"])
+    register(folder, settings, ["mcp-peer"])
     print("Verified the SSH connection to " + settings["hosts"]["hub"] + ".")
     print(f"Initial pickup processed {pickup_notices(settings)} notice(s).")
 

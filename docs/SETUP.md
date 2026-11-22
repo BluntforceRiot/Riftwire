@@ -60,12 +60,13 @@ The peer sends a unique greeting. The hub reads and acknowledges that greeting, 
 - **The peer was asleep.** Its MCP reconnects and retrieves notices after the hub becomes reachable. For background pickup without an active MCP client, run the installed peer script with `listen-peer` under that same login. An interrupted delivery can repeat the native notice for one message UUID. The mailbox stores the message once.
 - **The native queue reported a failure.** Check that this login's Codex CLI can access the intended chat and supports `queue`. The message remains in the inbox. After correcting the problem, start a fresh two-chat check.
 - **A send was interrupted.** Retry using the same `message_id`, recipient and text. The hub handles repeated submissions for the same message. A message can hold up to 8 KiB of UTF-8 text.
+- **The mailbox reached a limit.** The SSH peer can submit 30 new messages per minute across its Codex and Hermes addresses. Idempotent retries keep the original message. The SQLite mailbox has a 64 MiB growth limit. An existing larger database keeps its allocated pages and history. At the storage limit, back up the mailbox before archiving read history on the hub.
 - **Control wake on message.** A newly addressed or enrolled Codex chat defaults to `wake: true`. Riftwire uses `codex queue --resume` to try to wake the chat. Codex uses the chat’s existing model. Ask Codex to use `set_wake` with `wake: false` to queue notices quietly, or with `wake: true` to resume. Enrollment also accepts `wake`. Omitting it keeps the saved setting. Contacts saved by earlier releases retain their stored setting, which was usually false.
 - **Read a reply in Hermes.** Use the Hermes profile’s `inbox` and `ack` tools. A receipt with `notice: inbox_only` means the reply is stored and available through MCP. [Hermes setup](HERMES.md)
 
 ## Privacy and extensions
 
-SSH encrypts the connection and checks the hub's pinned host key. The hub saves message bodies in a plaintext SQLite file owned by the hub account. Native notices contain the message UUID and routing addresses. Anyone with the relevant operating-system account's access is inside the trust boundary. Use encryption at rest on the hub if your messages require it.
+SSH encrypts the connection and checks the hub's host key. When you supply `--known-hosts`, Riftwire uses that file as its sole host-key source and verifies each new connection. The hub saves message bodies in a plaintext SQLite file owned by the hub account. Native notices contain the message UUID and routing addresses. Anyone with the relevant operating-system account's access is inside the trust boundary. Use encryption at rest on the hub if your messages require it.
 
 Riftwire runs independently. The optional Hermes MCP uses the same mailbox and SSH route. Memory services and shared files have their own lifecycles. The base setup requires the two local Codex installations, Python, and the SSH route.
 
@@ -79,6 +80,6 @@ Choose that key through a dedicated SSH alias or the peer installer's `--identit
 
 ## Upgrade or disconnect
 
-Install the new release on the hub first, then on the peer, using the same role and SSH alias. Refresh the MCP connections so existing processes load the new code. The hub retains its SQLite mailbox on upgrade. Use a matching release on both sides for the installation test.
+Install the new release on the hub first, then on the peer, using the same role and SSH alias. Peer upgrades reuse saved `--identity` and `--known-hosts` files for the connection check and subsequent traffic. Supply the verified file again if an earlier upgrade removed its setting or the file moved. Refresh the MCP connections so existing processes load the new code. The hub retains its SQLite mailbox on upgrade. Use a matching release on both sides for the installation test.
 
 To disconnect, run `codex mcp remove riftwire` on each participating login, close any standalone listener, and reload Codex's MCP connections. The local installation files and existing mailbox remain under their per-user paths. A dedicated SSH public key can be revoked by its owning hub administrator.
