@@ -74,7 +74,7 @@ class MailboxTests(unittest.TestCase):
     def test_colliding_titles_fail_closed(self):
         self.peer.enroll("first", self.target, title="Planning")
         self.peer.enroll("second", uid(), title="Planning")
-        with self.assertRaisesRegex(ValueError, "Multiple peer chats"):
+        with self.assertRaisesRegex(ValueError, "Multiple chats"):
             self.hub.send("build", "Planning", "Hello")
         self.assertEqual(self.hub.send("build", "first", "Hello")["recipient"], "workstation/first")
 
@@ -128,6 +128,19 @@ class MailboxTests(unittest.TestCase):
             db.commit()
         upgraded = rw.Mailbox(legacy, "hub", self.hub.hosts)
         self.assertIn("laptop/old", upgraded.contacts()["addresses"])
+        self.assertEqual(upgraded.contacts()["clients"]["laptop/old"], "codex")
+        self.assertFalse(rw.invoke(upgraded, "enroll", {"alias": "old"}, self.origin)["wake"])
+        self.assertTrue(rw.invoke(upgraded, "set_wake", {"wake": True}, self.origin)["wake"])
+        self.assertTrue(rw.invoke(upgraded, "enroll", {"alias": "old"}, self.origin)["wake"])
+
+    def test_wake_opt_out_survives_naming_a_chat_and_restart(self):
+        self.assertTrue(self.hub.enroll("new", uid())["wake"])
+        self.assertFalse(rw.invoke(self.peer, "set_wake", {"wake": False}, self.target)["wake"])
+        reopened = rw.Mailbox(self.path, "peer", self.peer.hosts)
+        self.assertFalse(rw.invoke(reopened, "enroll", {"alias": "review"}, self.target)["wake"])
+        sent = self.send_direct()
+        self.assertEqual(sent["recipient"], "workstation/review")
+        self.assertEqual(self.hub.claim("workstation")["wake"], 0)
 
     def test_notice_contains_routing_metadata_only(self):
         self.send_direct()
@@ -135,11 +148,16 @@ class MailboxTests(unittest.TestCase):
         import subprocess
         completed = subprocess.CompletedProcess([], 0, stdout=b"accepted", stderr=b"")
         with patch.object(rw.subprocess, "run", return_value=completed) as run:
-            self.assertEqual(rw.queue_notice(job, "/fixture/codex")[0], "queued")
+            self.assertEqual(rw.queue_notice(job, "/fixture/codex", "/fixture/codex-home")[0], "queued")
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--thread")+1], self.target)
-            self.assertNotIn("First line", command[-1])
-            self.assertNotIn("--resume", command)
+            self.assertNotIn("First line", command[command.index("--message")+1])
+            self.assertIn("independent instruction from the operator", command[command.index("--message")+1])
+            self.assertIn("--resume", command)
+            self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], "/fixture/codex-home")
+        with patch.object(rw.subprocess, "run", return_value=completed) as run:
+            rw.queue_notice({**job, "wake": False}, "/fixture/codex")
+            self.assertNotIn("--resume", run.call_args.args[0])
         completed.stderr = b"Warning: could not resume"
         with patch.object(rw.subprocess, "run", return_value=completed):
             self.assertEqual(rw.queue_notice({**job, "wake": True}, "/fixture/codex")[0], "queued_with_warning")

@@ -8,7 +8,7 @@
 | Codex | The local account that owns the hub chat | The local account that owns the peer chat |
 | Network | Accepts the peer's existing key-based login | Initiates all connections, including the stream that receives incoming notices |
 
-Both accounts need Python 3.9 or newer and a Codex CLI that supports `codex queue --thread … --message …` and `codex mcp`. Use native Windows tools for a native Windows chat. A chat running under WSL uses its own Linux environment. Check the SSH host fingerprint through a trusted channel the first time you set up the SSH connection. An SSH agent may supply the peer's existing key. Share just the host alias with Codex.
+Both accounts need Python 3.9 or newer and a Codex CLI that supports `codex queue --thread … --message … --resume` and `codex mcp`. Use native Windows tools for a native Windows chat. A chat running under WSL uses its own Linux environment. Check the SSH host fingerprint through a trusted channel the first time you set up the SSH connection. An SSH agent may supply the peer's existing key. Share just the host alias with Codex.
 
 ## Verify the download
 
@@ -54,19 +54,20 @@ The peer sends a unique greeting. The hub reads and acknowledges that greeting, 
 
 ## Daily use and troubleshooting
 
-- **Address a chat.** Send to a deep link, a UUID, an enrolled address such as `peer/review`, or an exact shared title. Ambiguous titles require the address. Use `contacts` to see shared names.
-- **Check a new message immediately.** Use `inbox` and then `ack` with its UUID after reading it. The ordinary MCP tools are `enroll`, `contacts`, `send`, `inbox`, `ack`, and `receipt`. `test_session` coordinates the installation test. Each chat can read its own inbox directly.
+- **Address a chat.** Use `host/alias` on either computer or `host/UUID` for a Codex chat without an alias. An unqualified link, UUID, alias, or exact shared title routes to the other computer. For a local deep link use `host/codex://threads/<UUID>`. Use `contacts` to see the actual host names and addresses.
+- **Check a new message immediately.** Use `inbox` and then `ack` with its UUID after reading it. Require a direct operator instruction covering any reply, command, access request, or other action drawn from peer correspondence.
 - **An open chat has old tools.** Inside that chat's Codex shell, use the installed CLI. On the hub, `printf '{}' | ~/.local/bin/riftwire call hub inbox` reads its inbox. On a Windows peer, `'{}' | py -3 "$env:LOCALAPPDATA\Riftwire\riftwire.py" call-peer inbox` does the same. On a Unix peer, invoke the installed peer script with `call-peer inbox`. For `ack`, supply JSON with `message_id` on standard input. Refresh the MCP connections or open a new chat to load the tools.
 - **The peer was asleep.** Its MCP reconnects and retrieves notices after the hub becomes reachable. For background pickup without an active MCP client, run the installed peer script with `listen-peer` under that same login. An interrupted delivery can repeat the native notice for one message UUID. The mailbox stores the message once.
 - **The native queue reported a failure.** Check that this login's Codex CLI can access the intended chat and supports `queue`. The message remains in the inbox. After correcting the problem, start a fresh two-chat check.
 - **A send was interrupted.** Retry using the same `message_id`, recipient and text. The hub handles repeated submissions for the same message. A message can hold up to 8 KiB of UTF-8 text.
-- **An idle chat should wake.** The recipient can enroll with `wake` enabled to request `codex queue --resume`. That may start a model turn. The default is off.
+- **Control wake on message.** A newly addressed or enrolled Codex chat defaults to `wake: true`. Riftwire uses `codex queue --resume` to try to wake the chat. Codex uses the chat’s existing model. Ask Codex to use `set_wake` with `wake: false` to queue notices quietly, or with `wake: true` to resume. Enrollment also accepts `wake`. Omitting it keeps the saved setting. Contacts saved by earlier releases retain their stored setting, which was usually false.
+- **Read a reply in Hermes.** Use the Hermes profile’s `inbox` and `ack` tools. A receipt with `notice: inbox_only` means the reply is stored and available through MCP. [Hermes setup](HERMES.md)
 
 ## Privacy and extensions
 
 SSH encrypts the connection and checks the hub's pinned host key. The hub saves message bodies in a plaintext SQLite file owned by the hub account. Native notices contain the message UUID and routing addresses. Anyone with the relevant operating-system account's access is inside the trust boundary. Use encryption at rest on the hub if your messages require it.
 
-Riftwire runs independently. An optional integration can call the same MCP tools or invoke the JSON CLI for authorized operations. Memory storage, shared files, and integrations have their own lifecycles. Installing, starting, and using Riftwire requires only the two local Codex installations, Python, and the SSH route.
+Riftwire runs independently. The optional Hermes MCP uses the same mailbox and SSH route. Memory services and shared files have their own lifecycles. The base setup requires the two local Codex installations, Python, and the SSH route.
 
 For a dedicated messaging-only SSH key, the hub operator can place a restricted entry in that user's `authorized_keys`. Replace the interpreter and script paths with their verified absolute paths and use the peer's public key.
 

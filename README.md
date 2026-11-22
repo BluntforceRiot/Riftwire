@@ -2,7 +2,7 @@
 
 # Riftwire
 
-**Send a message from a Codex chat on one computer to a chat on another, and see when the recipient reads it.** Paste a chat link or use a nickname. Riftwire runs on the two computers using SSH and its own mailbox. It works independently of any memory system.
+**Send messages between Codex chats on two computers and see when they’re read.** Hermes Agent can join the same connection and message Codex on either computer. Paste a chat link or use a nickname. Riftwire uses SSH and its own mailbox and works independently of any memory system.
 
 ## Give this to Codex on both computers
 
@@ -10,7 +10,11 @@ Open one chat on each computer. Paste this prompt into both and add the GitHub l
 
 > Install Riftwire for my user account from the GitHub link below. Follow its AGENTS.md and pair this chat with the setup chat on my other computer using my existing SSH connection. I authorize one test message in each direction and both read receipts. Show me the results.
 
-One computer needs to accept SSH and run Linux or macOS. The other can run Windows, Linux, or macOS. Both need Python 3.9+ and a native Codex CLI with the `queue` command. If Codex asks which SSH connection to use, give it the alias you already use to reach the mailbox computer. The test can start in either chat once the hub is installed. [Installation guide](docs/SETUP.md)
+One computer needs to accept SSH and run Linux or macOS. The other can run Windows, Linux, or macOS. Both need Python 3.9+ and a native Codex CLI with `queue --resume`. Give Codex your existing SSH alias if asked. Once the hub is installed, the test can start in either chat. [Installation guide](docs/SETUP.md)
+
+## Add Hermes Agent
+
+Register Riftwire as a local MCP server in a Hermes profile on either computer. Hermes can send to your local Codex chat or the other computer’s chat. Codex can reply to the Hermes profile’s inbox. Each configured Hermes profile has one Riftwire address. [Hermes setup and examples](docs/HERMES.md)
 
 ## Use it in a chat
 
@@ -20,6 +24,7 @@ One computer needs to accept SSH and run Linux or macOS. The other can run Windo
 | Give a chat a nickname | “Give this chat the Riftwire alias `review` and the shared title `Build review`.” |
 | Read and acknowledge | “Read my Riftwire inbox and acknowledge the message about the build.” |
 | Check a handoff | “Check the read receipt for the message I just sent.” |
+| Keep a Codex chat quiet | “Turn off Riftwire wake on message for this chat.” |
 
 A chat link works on the first send. A short alias or unique shared title works once its owner enrolls it. The contacts list contains only chats introduced to Riftwire.
 
@@ -32,9 +37,10 @@ The **hub** is the computer that accepts SSH. It stores messages and receipts in
 | `pending` | The hub saved the message. Its native notice is waiting for pickup. |
 | `queued` | The receiving Codex CLI accepted the notice. |
 | `queued_with_warning` | Codex accepted the notice and reported a warning. Open the recipient chat to check it. |
+| `inbox_only` | The message is ready in the addressed Hermes profile’s inbox. |
 | `seen` timestamp | The recipient explicitly acknowledged reading the message. |
 
-The hub retains accepted messages while the peer is asleep. With the default settings, an idle chat can read its inbox when next opened. The recipient may opt in to waking its chat on arrival. An existing OS login on each computer is the trust boundary. [Setup, storage, and troubleshooting](docs/SETUP.md)
+The hub retains accepted messages while the peer is asleep. Riftwire tries to resume a newly addressed Codex chat by default. Each Codex chat can opt out and keep its queued notices. Existing chats keep their saved preference after upgrade. Hermes reads its inbox through MCP when asked. [Setup, storage, and troubleshooting](docs/SETUP.md)
 
 ## Build and license
 

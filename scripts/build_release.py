@@ -17,10 +17,12 @@ FILES = (
     "LICENSE",
     "README.md",
     "assets/riftwire-banner.webp",
+    "docs/HERMES.md",
     "docs/SETUP.md",
     "riftwire.py",
     "scripts/build_release.py",
     "tests/test_chat_check.py",
+    "tests/test_hermes.py",
     "tests/test_riftwire.py",
 )
 
