@@ -2,7 +2,9 @@
 
 # Riftwire
 
-**Send messages between Codex chats on two computers and see when they’re read.** Hermes Agent can join the same connection and message Codex on either computer. Paste a chat link or use a nickname. Riftwire uses SSH and its own mailbox and works independently of any memory system.
+**Riftwire connects Codex chats working in local projects on two computers.** Send a message from a project chat on your laptop to a project chat on your desktop and see when it’s read. Address a chat by its link or nickname.
+
+Each computer uses the Codex account signed in there. The accounts can be the same or different. Riftwire connects the machines over SSH, uses its own mailbox, and works independently of any memory system. Hermes Agent can join the same connection.
 
 ## Give this to Codex on both computers
 
