@@ -1,0 +1,40 @@
+name: Verify Riftwire v0.4.0 with native Windows Codex
+on:
+  push:
+    branches:
+      - 'verify/windows-v0.4.0'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0
+        with:
+          python-version: '3.13'
+      - name: Verify checksums and exercise the Windows peer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $verifyDir = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'riftwire-040-check')
+          $codexArchive = Join-Path $verifyDir 'codex-win.tar.gz'
+          curl.exe --fail --silent --show-error --location --retry 2 --max-time 210 'https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-x86_64-pc-windows-msvc.exe.tar.gz' --output $codexArchive
+          if ($LASTEXITCODE -ne 0) { throw 'Codex download failed.' }
+          if ((Get-FileHash -Algorithm SHA256 $codexArchive).Hash.ToLowerInvariant() -ne '4cfd8acd6dd74ccba36393c33b460907e907a8c19051e16a0d0a9783ae0246c5') { throw 'Unexpected Codex checksum.' }
+          tar.exe -xzf $codexArchive -C $verifyDir
+          if ($LASTEXITCODE -ne 0) { throw 'Codex unpack failed.' }
+          $codex = @(Get-ChildItem $verifyDir -Recurse -File | Where-Object { $_.Name -in @('codex.exe','codex-x86_64-pc-windows-msvc.exe') })
+          if ($codex.Count -ne 1) { throw 'Codex executable was not found unambiguously.' }
+
+          $riftwireZip = Join-Path $verifyDir 'Riftwire-0.4.0.zip'
+          curl.exe --fail --silent --show-error --location --max-time 30 'https://github.com/BluntforceRiot/Riftwire/releases/download/v0.4.0/Riftwire-0.4.0.zip' --output $riftwireZip
+          if ($LASTEXITCODE -ne 0) { throw 'Riftwire download failed.' }
+          if ((Get-FileHash -Algorithm SHA256 $riftwireZip).Hash.ToLowerInvariant() -ne 'b699ac6570ef1304a281ede24d75fd48da4abfac67427c4d0165fdde52950015') { throw 'Unexpected Riftwire checksum.' }
+          Expand-Archive -LiteralPath $riftwireZip -DestinationPath $verifyDir
+          $entry = Join-Path $verifyDir 'Riftwire-0.4.0/riftwire.py'
+          python -I -B .github/verification/riftwire_windows.py $codex[0].FullName $entry
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
