@@ -1,0 +1,50 @@
+name: Publish Riftwire v0.4.0
+on:
+  push:
+    branches:
+      - 'release/publish-v0.4.0'
+  create:
+permissions:
+  contents: read
+jobs:
+  publish:
+    if: github.repository == 'BluntforceRiot/Riftwire' && github.ref == 'refs/heads/release/publish-v0.4.0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    concurrency: riftwire-v0.4.0-release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5b0f2938213f1b4b725484cad7316ecd0b9ecae3
+          persist-credentials: false
+      - name: Build the reviewed release and verify its checksum
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "5b0f2938213f1b4b725484cad7316ecd0b9ecae3"
+          python3 -I -B scripts/build_release.py
+          printf '%s  %s\n' 'b699ac6570ef1304a281ede24d75fd48da4abfac67427c4d0165fdde52950015' 'dist/Riftwire-0.4.0.zip' | sha256sum -c -
+      - name: Publish the ZIP and checksum on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.4.0 --repo 'BluntforceRiot/Riftwire' >/dev/null 2>&1; then
+            echo 'Riftwire v0.4.0 already exists.'
+            exit 1
+          fi
+          gh release create v0.4.0 dist/Riftwire-0.4.0.zip dist/SHA256SUMS \
+            --repo 'BluntforceRiot/Riftwire' --target '5b0f2938213f1b4b725484cad7316ecd0b9ecae3' --title 'Riftwire v0.4.0' --latest --notes-file - <<'NOTES'
+          ## A friends list for Codex and Hermes
+          
+          In a nod to ICQ, every Codex chat has a number of its own. Its thread ID keeps the same Riftwire address even when the chat changes names.
+          
+          - Ask “Show my Riftwire friends list on this PC.” Search saved chats by title, folder, or ID.
+          - New chats appear after Codex saves them. Archived chats drop out of discovery, and favorites appear first.
+          - Each computer discovers its own chats. Choose which chats to share with the paired computer.
+          
+          ## Upgrade
+          
+          Download the ZIP and `SHA256SUMS`, then follow the [upgrade guide](https://github.com/BluntforceRiot/Riftwire/blob/v0.4.0/docs/SETUP.md#upgrade-or-disconnect). Upgrade the hub before the peer and use the saved SSH target. The friends list uses native Codex 0.171.0 or later.
+          NOTES
