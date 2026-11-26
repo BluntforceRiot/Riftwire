@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "project": "riftwire",
+  "repository": "https://github.com/BluntforceRiot/Riftwire",
+  "name": "Compare two fixes",
+  "steps": [
+    {
+      "id": "first-fix",
+      "role": "first-author",
+      "action": "patch",
+      "task": "Propose a minimal fix for the issue in the brief. Run the project's checks and summarize your approach."
+    },
+    {
+      "id": "second-fix",
+      "role": "second-author",
+      "action": "patch",
+      "task": "Independently propose a fix for the issue in the brief. Run the same checks and summarize your approach."
+    },
+    {
+      "id": "compare",
+      "role": "reviewer",
+      "action": "review",
+      "task": "Compare both patch files and their behavior against the brief. Report which changes are ready for maintainer review.",
+      "needs": ["first-fix", "second-fix"]
+    }
+  ]
+}

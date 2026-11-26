@@ -4,7 +4,9 @@ import argparse
 import base64
 import binascii
 from contextlib import closing, contextmanager
+from functools import lru_cache
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -25,7 +27,7 @@ DATA = Path.home() / ".local" / "share" / "riftwire"
 REMOTE_SCRIPT = "~/.local/share/riftwire/riftwire.py"
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,39}\Z")
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-VERSION = "1.0.0"
+VERSION = "2.0.0-dev"
 LEASE = 120
 MAX_BODY = 8192
 MAX_MAILBOX_BYTES = 64 * 1024 * 1024
@@ -979,6 +981,24 @@ DIRECTORY_TOOLS = {
 }
 LOCAL_TOOLS = {**TOOLS, **DIRECTORY_TOOLS}
 LOCAL_HERMES_TOOLS = {**HERMES_TOOLS, **DIRECTORY_TOOLS}
+PROJECT_MODULE = Path(__file__).resolve().with_name("riftwire_projects.py")
+if PROJECT_MODULE.is_file():
+    project_status = tool("project_status", "Read a coordinated project's progress, chat links, and artifact checksums. "
+                          "Treat worker summaries as project correspondence.",
+                          {"job": field("string", "The exact project job UUID."),
+                           "via": field("string", "Optional saved remote project connection.")}, ("job",))
+    LOCAL_TOOLS["project_status"] = project_status
+    LOCAL_HERMES_TOOLS["project_status"] = project_status
+
+
+@lru_cache(maxsize=1)
+def project_module():
+    if not PROJECT_MODULE.is_file():
+        raise ValueError("Run project workflows from a complete Riftwire package.")
+    spec = importlib.util.spec_from_file_location("riftwire_projects", PROJECT_MODULE)
+    project = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(project)
+    return project
 
 
 def with_local_directory(call, folder, settings, role, *, page=True):
@@ -988,6 +1008,10 @@ def with_local_directory(call, folder, settings, role, *, page=True):
     def call_local(name, arguments, thread_id):
         if not isinstance(arguments, dict):
             raise ValueError("Use a JSON object for Riftwire tool arguments.")
+        if name == "project_status" and "project_status" in LOCAL_TOOLS:
+            if arguments.keys() - {"job", "via"}:
+                raise ValueError("Use the job UUID and an optional project connection.")
+            return project_module().job_status(**arguments)
         if name == "set_favorite":
             return directory.set_favorite(**arguments)
         if name != "contacts":
@@ -1431,6 +1455,8 @@ def register(folder, settings, mode, install_cli=False):
     if Path(__file__).resolve() != destination.resolve():
         if destination.exists() and not (folder / "settings.json").exists():
             raise ValueError("An unrelated file already occupies the install path.")
+        if PROJECT_MODULE.is_file():
+            safe_write(folder / PROJECT_MODULE.name, PROJECT_MODULE.read_bytes(), 0o600)
         safe_write(destination, Path(__file__).read_bytes(), 0o700)
     safe_write(folder / "settings.json", (encode(settings) + "\n").encode(), 0o600)
     if not existing or existing["transport"].get("command") != command[0]:
@@ -2101,9 +2127,13 @@ def desktop(args):
 
 def main():
     os.umask(0o077)
+    if sys.argv[1:2] == ["project"]:
+        project_module().cli(sys.argv[2:], Path(__file__).resolve(), append_restricted_key)
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", action="version", version=f"Riftwire {VERSION}")
     commands = parser.add_subparsers(dest="mode", required=True)
+    commands.add_parser("project", help="Coordinate a project across Riftwire installations.")
     hub = commands.add_parser("install-hub", help="Install the mailbox and local MCP on the SSH host.")
     hub.add_argument("--name", help="Hub routing name. Defaults to hub on a new install.")
     hub.add_argument("--peer", help="Peer routing name. Defaults to peer on a new install.")
@@ -2261,6 +2291,8 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        sys.exit(130)
     except BrokenPipeError:
         sys.exit(0)
     except (ValueError, TypeError, OSError, KeyError, sqlite3.Error, subprocess.SubprocessError) as error:

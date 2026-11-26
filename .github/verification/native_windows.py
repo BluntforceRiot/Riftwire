@@ -20,7 +20,8 @@ class ResponsesFixture(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
         message = {"id": "msg_fixture", "type": "message", "role": "assistant", "status": "completed",
-                   "content": [{"type": "output_text", "text": "Fixture saved.", "annotations": []}]}
+                   "content": [{"type": "output_text", "text": getattr(self.server, "fixture_result", "Fixture saved."),
+                                "annotations": []}]}
         events = [
             {"type": "response.created", "response": {"id": "resp_fixture", "status": "in_progress", "output": []}},
             {"type": "response.output_item.done", "output_index": 0, "item": message},

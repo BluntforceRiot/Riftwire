@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "project": "riftwire",
+  "repository": "https://github.com/BluntforceRiot/Riftwire",
+  "name": "Prepare a cross-platform release",
+  "steps": [
+    {
+      "id": "build",
+      "role": "linux-builder",
+      "action": "build",
+      "task": "Build the pinned Riftwire revision. Save the ZIP and its SHA-256 manifest.",
+      "artifacts": ["dist/Riftwire-release.zip", "dist/SHA256SUMS"]
+    },
+    {
+      "id": "windows",
+      "role": "windows-verifier",
+      "action": "verify",
+      "task": "Verify the offered ZIP against its manifest and run the approved native Windows checks.",
+      "needs": ["build"],
+      "different_from": ["build"]
+    },
+    {
+      "id": "review",
+      "role": "reviewer",
+      "action": "review",
+      "task": "Review the pinned candidate against the project's release requirements. Return any remaining blockers."
+    },
+    {
+      "id": "publish-review",
+      "role": "maintainer",
+      "action": "approve",
+      "task": "Record the maintainer's approval after reviewing the checks and the signed worker results.",
+      "needs": ["windows", "review"]
+    }
+  ]
+}

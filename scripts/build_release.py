@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import os
 from pathlib import Path
+import re
 import runpy
 import tempfile
 import zipfile
@@ -20,23 +21,30 @@ FILES = (
     "README.md",
     "assets/riftwire-banner.webp",
     "docs/HERMES.md",
+    "docs/PROJECTS.md",
     "docs/RELEASE.md",
     "docs/SETUP.md",
+    "examples/workflows/compare-fixes.json",
+    "examples/workflows/release.json",
     "riftwire.py",
+    "riftwire_projects.py",
     "scripts/build_release.py",
     "tests/test_chat_check.py",
     "tests/test_contacts.py",
     "tests/test_hermes.py",
     "tests/test_network.py",
+    "tests/test_projects.py",
     "tests/test_riftwire.py",
 )
 
 
-def build(folder):
+def build(folder, archive_name=None):
     version = runpy.run_path(str(ROOT / "riftwire.py"))["VERSION"]
     name = f"Riftwire-{version}"
     folder.mkdir(parents=True, exist_ok=True)
-    archive = folder / (name + ".zip")
+    if archive_name is not None and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\.zip", archive_name):
+        raise ValueError("Use a plain filename ending in .zip.")
+    archive = folder / (archive_name or (name + ".zip"))
     with tempfile.TemporaryDirectory(dir=folder) as temporary:
         staged = Path(temporary) / archive.name
         # Stored entries avoid any dependency on the builder's compression library.
@@ -60,4 +68,6 @@ def build(folder):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
-    build(parser.parse_args().out)
+    parser.add_argument("--archive-name", help="Optional ZIP filename for a workflow with declared artifact names.")
+    args = parser.parse_args()
+    build(args.out, args.archive_name)
