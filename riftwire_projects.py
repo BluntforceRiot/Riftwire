@@ -108,6 +108,12 @@ def guid(value):
     return str(uuid.UUID(value))
 
 
+def page_limit(value):
+    if type(value) is not int or not 1 <= value <= 50:
+        raise ValueError("Project page limits must be integers from 1 to 50.")
+    return value
+
+
 def string(value, limit, *, empty=False):
     if not isinstance(value, str) or len(value.encode("utf-8")) > limit or (not empty and not value.strip()):
         raise ValueError(f"Provide text of up to {limit} UTF-8 bytes.")
@@ -360,7 +366,28 @@ class ProjectStore:
                     PRIMARY KEY(job, step));
                 CREATE TABLE IF NOT EXISTS presence (member TEXT PRIMARY KEY, seen INTEGER NOT NULL);
                 CREATE INDEX IF NOT EXISTS project_jobs ON jobs(project, created);
+                CREATE INDEX IF NOT EXISTS results_by_job ON results(job, step);
             """)
+
+    @staticmethod
+    def has_attempt_events(db):
+        return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='attempt_events'").fetchone() is not None
+
+    def ensure_attempt_events(self, db):
+        if self.has_attempt_events(db):
+            return
+        # The first abandonment adds a shared timeline for decisions and signed results.
+        # Its write transaction preserves the existing receipt order during migration.
+        db.execute("""CREATE TABLE attempt_events (
+                      position INTEGER PRIMARY KEY, attempt TEXT NOT NULL UNIQUE,
+                      job TEXT NOT NULL, step TEXT NOT NULL, decision TEXT,
+                      FOREIGN KEY(job, step) REFERENCES steps(job, name))""")
+        db.execute("""INSERT INTO attempt_events(attempt,job,step)
+                      SELECT attempt,job,step FROM results ORDER BY rowid""")
+        db.execute("CREATE INDEX attempt_events_by_job ON attempt_events(job, position)")
+        db.execute("""CREATE TRIGGER record_signed_attempt AFTER INSERT ON results BEGIN
+                      INSERT INTO attempt_events(attempt,job,step) VALUES (NEW.attempt,NEW.job,NEW.step);
+                      END""")
 
     def grant(self, worker, project, roles):
         worker, project, roles = identity(worker), label(project), names(roles)
@@ -433,6 +460,29 @@ class ProjectStore:
     def ready(step, rows):
         return all(rows[name]["state"] == "passed" for name in step["needs"])
 
+    def list_jobs(self, project=None, limit=25, *, member=None):
+        limit = page_limit(limit)
+        if member is not None or project is not None:
+            project = label(project)
+        if member is None and not self.database.is_file():
+            return {"jobs": [], "has_more": False}
+        with self.connect() as db:
+            db.execute("BEGIN")
+            if member is not None:
+                self.authorized(db, member, project)
+            rows = db.execute("""SELECT id, project, workflow, commit_id, created FROM jobs
+                                 WHERE (? IS NULL OR project=?)
+                                 ORDER BY created DESC, rowid DESC LIMIT ?""",
+                              (project, project, limit + 1)).fetchall()
+            jobs = []
+            for row in rows[:limit]:
+                counts = {state["state"]: state["count"] for state in db.execute(
+                    "SELECT state, COUNT(*) AS count FROM steps WHERE job=? GROUP BY state",
+                    (row["id"],))}
+                jobs.append({"job": row["id"], "project": row["project"], "name": json.loads(row["workflow"])["name"],
+                             "commit": row["commit_id"], "created": row["created"], "steps": counts})
+        return {"jobs": jobs, "has_more": len(rows) > limit}
+
     def status(self, job, member=None):
         with self.connect() as db:
             details = self.job(db, job)
@@ -454,7 +504,7 @@ class ProjectStore:
             report = reports.get(current["attempt"], {})
             chat = report.get("chat")
             steps.append({"id": step["id"], "role": step["role"], "action": step["action"], "state": state,
-                          "worker": current["member"], "summary": current["summary"],
+                          "worker": current["member"], "attempt": current["attempt"], "summary": current["summary"],
                           "chat": f"codex://threads/{chat}" if chat else None,
                           "artifacts": {key: obj["sha256"] for key, obj in report.get("artifacts", {}).items()},
                           "approval": approvals.get(step["id"])})
@@ -526,6 +576,8 @@ class ProjectStore:
                 raise ValueError("This worker does not hold that active claim.")
             assignment = json.loads(row["assignment"])
             signer = self.authorized(db, member, details["project"], assignment["step"]["role"])
+            if row["state"] == "abandoned":
+                raise ValueError("The coordinator abandoned this project attempt.")
         report = verify_result(signer, assignment, envelope)
         saved = canonical(envelope)
         with self.connect(write=True) as db:
@@ -533,6 +585,8 @@ class ProjectStore:
             current = self.rows(db, job)[step]
             if current["attempt"] != attempt or current["member"] != member:
                 raise ValueError("This claim changed while its report was being checked.")
+            if current["state"] == "abandoned":
+                raise ValueError("The coordinator abandoned this project attempt.")
             previous = db.execute("SELECT envelope FROM results WHERE attempt=?", (attempt,)).fetchone()
             if previous is not None:
                 if previous["envelope"] != saved:
@@ -545,22 +599,49 @@ class ProjectStore:
         return {"job": job, "step": step, "attempt": attempt, "outcome": report["outcome"],
                 "result_sha256": object_id(envelope)}
 
+    def abandon(self, job, step, attempt, reason):
+        job, step, attempt = guid(job), label(step), guid(attempt)
+        reason = string(reason, 2048)
+        with self.connect(write=True) as db:
+            self.job(db, job)
+            self.ensure_attempt_events(db)
+            previous = db.execute("SELECT decision FROM attempt_events WHERE job=? AND step=? AND attempt=?",
+                                  (job, step, attempt)).fetchone()
+            if previous is not None:
+                if previous["decision"] is None:
+                    raise ValueError("This attempt already has a signed result.")
+                decision = json.loads(previous["decision"])
+                if decision["reason"] != reason:
+                    raise ValueError("This attempt already records a different abandonment reason.")
+            else:
+                row = self.rows(db, job).get(step)
+                if row is None or row["state"] != "claimed" or row["attempt"] != attempt:
+                    raise ValueError("This step does not have that active claim.")
+                decision = {"coordinator": self.information()["id"], "worker": row["member"],
+                            "reason": reason, "at": int(time.time())}
+                db.execute("INSERT INTO attempt_events(attempt,job,step,decision) VALUES (?,?,?,?)",
+                           (attempt, job, step, canonical(decision)))
+                db.execute("UPDATE steps SET state='abandoned',summary=? WHERE job=? AND name=?", (reason, job, step))
+        worker = decision.pop("worker")
+        return {"job": job, "step": step, "attempt": attempt, "worker": worker,
+                "outcome": "abandoned", "operator_decision": decision}
+
     def requeue(self, job, step):
         job, step = guid(job), label(step)
         with self.connect(write=True) as db:
             self.job(db, job)
             row = self.rows(db, job).get(step)
-            if row is None or row["state"] not in ("failed", "interrupted"):
-                raise ValueError("Requeue a failed step or one with a signed interruption report.")
-            old = db.execute("SELECT envelope FROM results WHERE attempt=?", (row["attempt"],)).fetchone()
-            parsed = json.loads(old["envelope"])
-            checkpoint = None
+            if row is None or row["state"] not in ("failed", "interrupted", "abandoned"):
+                raise ValueError("Requeue a failed, interrupted, or abandoned step.")
+            checkpoint = row["checkpoint"] if row["state"] == "abandoned" else None
             if row["state"] == "interrupted":
+                old = db.execute("SELECT envelope FROM results WHERE attempt=?", (row["attempt"],)).fetchone()
+                parsed = json.loads(old["envelope"])
                 result = parsed["result"]
-                checkpoint = {"result_sha256": object_id(parsed), "summary": result["summary"],
-                              "artifacts": result["artifacts"]}
+                checkpoint = canonical({"result_sha256": object_id(parsed), "summary": result["summary"],
+                                        "artifacts": result["artifacts"]})
             db.execute("""UPDATE steps SET state='pending',member=NULL,attempt=NULL,assignment=NULL,summary=NULL,
-                          checkpoint=? WHERE job=? AND name=?""", (canonical(checkpoint) if checkpoint else None, job, step))
+                          checkpoint=? WHERE job=? AND name=?""", (checkpoint, job, step))
         return self.status(job)
 
     def approve(self, job, step, note):
@@ -578,13 +659,70 @@ class ProjectStore:
             db.execute("UPDATE steps SET state='passed',summary=? WHERE job=? AND name=?", (note, job, step))
         return self.status(job)
 
-    def result(self, job, step):
+    def history(self, job, step=None, limit=25, before=None, *, member=None):
+        job, limit = guid(job), page_limit(limit)
+        step = label(step) if step is not None else None
+        before = guid(before) if before is not None else None
+        if not self.database.is_file():
+            raise ValueError("This project job was not found.")
+        attempts = []
+        next_before = None
+        with self.connect() as db:
+            db.execute("BEGIN")
+            details = self.job(db, job)
+            if member is not None:
+                self.authorized(db, member, details["project"])
+            if step is not None and db.execute("SELECT 1 FROM steps WHERE job=? AND name=?", (job, step)).fetchone() is None:
+                raise ValueError("This project step was not found.")
+            events = "attempt_events" if self.has_attempt_events(db) else (
+                "(SELECT rowid AS position, attempt, job, step, NULL AS decision FROM results)"
+            )
+            cursor = None
+            if before is not None:
+                boundary = db.execute(f"""SELECT position FROM {events} WHERE attempt=? AND job=?
+                                          AND (? IS NULL OR step=?)""", (before, job, step, step)).fetchone()
+                if boundary is None:
+                    raise ValueError("The history cursor does not belong to the selected job and step.")
+                cursor = boundary["position"]
+            rows = db.execute(f"""SELECT e.attempt, e.step, e.decision, r.worker, r.envelope, s.attempt AS current_attempt
+                                  FROM {events} AS e JOIN steps s ON s.job=e.job AND s.name=e.step
+                                  LEFT JOIN results r ON r.attempt=e.attempt
+                                  WHERE e.job=? AND (? IS NULL OR e.step=?) AND (? IS NULL OR e.position<?)
+                                  ORDER BY e.position DESC LIMIT ?""", (job, step, step, cursor, cursor, limit + 1))
+            for row in rows:
+                if len(attempts) == limit:
+                    next_before = attempts[-1]["attempt"]
+                    break
+                metadata = {"attempt": row["attempt"], "step": row["step"],
+                            "current": row["attempt"] == row["current_attempt"]}
+                if row["decision"] is not None:
+                    decision = json.loads(row["decision"])
+                    worker = decision.pop("worker")
+                    attempts.append({**metadata, "worker": worker, "outcome": "abandoned",
+                                     "summary": decision["reason"], "chat": None, "artifacts": {},
+                                     "operator_decision": decision})
+                    continue
+                envelope = json.loads(row["envelope"])
+                report = envelope["result"]
+                chat = report["chat"]
+                attempts.append({**metadata, "worker": json.loads(row["worker"])["id"],
+                                 "outcome": report["outcome"], "summary": report["summary"],
+                                 "result_sha256": object_id(envelope), "chat": f"codex://threads/{chat}" if chat else None,
+                                 "artifacts": {name: value["sha256"] for name, value in report["artifacts"].items()}})
+        return {"job": job, "attempts": attempts, "next_before": next_before}
+
+    def result(self, job, step, *, attempt=None):
         job, step = guid(job), label(step)
         with self.connect() as db:
-            row = db.execute("""SELECT r.worker,r.assignment,r.envelope FROM steps s JOIN results r ON r.attempt=s.attempt
-                                WHERE s.job=? AND s.name=?""", (job, step)).fetchone()
+            if attempt is None:
+                row = db.execute("""SELECT r.worker,r.assignment,r.envelope FROM steps s JOIN results r ON r.attempt=s.attempt
+                                    WHERE s.job=? AND s.name=?""", (job, step)).fetchone()
+            else:
+                row = db.execute("""SELECT worker,assignment,envelope FROM results WHERE job=? AND step=? AND attempt=?""",
+                                 (job, step, guid(attempt))).fetchone()
         if row is None:
-            raise ValueError("This step has no signed result yet.")
+            raise ValueError("This attempt has no signed result for the selected step." if attempt is not None
+                             else "This step has no signed result yet.")
         return {key: json.loads(row[key]) for key in ("worker", "assignment", "envelope")}
 
 
@@ -619,9 +757,15 @@ def rpc(store, member, request):
         with store.connect() as db:
             store.authorized(db, member, label(args["project"]))
         return {"version": VERSION, "coordinator": store.information()}
+    if action == "list":
+        fields(args, ("project",), ("limit",))
+        return store.list_jobs(member=member, **args)
     if action == "status":
         fields(args, ("job",))
         return store.status(args["job"], member)
+    if action == "history":
+        fields(args, ("job",), ("step", "limit", "before"))
+        return store.history(member=member, **args)
     if action == "claim":
         fields(args, ("project", "role", "actions", "repository"))
         return store.claim(member, **args)
@@ -990,12 +1134,37 @@ def connection(store, name):
     return RemoteProject(store, read_json(store.root / "connections" / (label(name) + ".json"), 8192))
 
 
+def job_list(project=None, via=None, limit=25, store=None):
+    store = store or ProjectStore(default_root())
+    limit = page_limit(limit)
+    project = label(project) if project is not None else None
+    if via is not None:
+        remote = connection(store, via)
+        invited = remote.invite["project"]
+        if project is not None and project != invited:
+            raise ValueError("This connection was invited for a different project.")
+        return remote.call("list", {"project": invited, "limit": limit})
+    return store.list_jobs(project, limit)
+
+
 def job_status(job, via=None, store=None):
     store = store or ProjectStore(default_root())
     job = guid(job)
     if via:
         return connection(store, via).call("status", {"job": job})
     return store.status(job)
+
+
+def job_history(job, step=None, via=None, limit=25, before=None, store=None):
+    store = store or ProjectStore(default_root())
+    args = {"job": guid(job), "limit": page_limit(limit)}
+    if step is not None:
+        args["step"] = label(step)
+    if before is not None:
+        args["before"] = guid(before)
+    if via is not None:
+        return connection(store, via).call("history", args)
+    return store.history(**args)
 
 
 def project_brief(store, job, selected):
@@ -1055,7 +1224,7 @@ def verify_record(record, worker, definition, commit, job=None):
             "artifacts": {name: value["sha256"] for name, value in report["artifacts"].items()}}
 
 
-def cli(argv, entry, add_key):
+def cli(argv, entry, add_key, archive_record=None):
     parser = argparse.ArgumentParser(prog="riftwire project", description=__doc__)
     parser.add_argument("--state", type=Path, default=default_root(), help="Use a separate local project data folder.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1083,9 +1252,19 @@ def cli(argv, entry, add_key):
     start.add_argument("--commit", required=True)
     start.add_argument("--brief", type=Path)
     start.add_argument("--job", help="Reuse this UUID when retrying the same start.")
+    listing = commands.add_parser("list", help="Discover recent project jobs.")
+    listing.add_argument("--project", help="Filter the coordinator's jobs by project name.")
+    listing.add_argument("--via", help="Saved remote project connection.")
+    listing.add_argument("--limit", type=int, default=25, help="Return up to this many jobs (1–50).")
     status = commands.add_parser("status", help="Read step status, artifact checksums, and approvals.")
     status.add_argument("job")
     status.add_argument("--via", help="Saved remote project connection.")
+    history = commands.add_parser("history", help="Read signed attempt summaries and operator decisions.")
+    history.add_argument("job")
+    history.add_argument("--step", help="Limit the history to one step.")
+    history.add_argument("--via", help="Saved remote project connection.")
+    history.add_argument("--limit", type=int, default=25, help="Return up to this many attempts (1–50).")
+    history.add_argument("--before", help="Continue with the previous page's next_before attempt UUID.")
     work = commands.add_parser("work", help="Run an eligible step with a local worker profile.")
     work.add_argument("profile", type=Path)
     work.add_argument("--via", help="Saved remote project connection.")
@@ -1096,23 +1275,36 @@ def cli(argv, entry, add_key):
     brief.add_argument("job")
     brief.add_argument("--step", action="append", default=[])
     for name, help_text in (("approve", "Record the coordinator operator's decision."),
-                            ("requeue", "Make a failed or checkpointed step eligible again."),
+                            ("abandon", "Record abandonment of an active claim on its coordinator."),
+                            ("requeue", "Make a failed, interrupted, or abandoned step eligible again."),
                             ("result", "Export a step's signed receipt and its input and output artifacts.")):
         command = commands.add_parser(name, help=help_text)
         command.add_argument("job")
         command.add_argument("step")
         if name == "approve":
             command.add_argument("--note", required=True)
+        elif name == "abandon":
+            command.add_argument("attempt", help="Exact active attempt UUID from job status.")
+            command.add_argument("--reason", required=True)
+        elif name == "result":
+            command.add_argument("--attempt", help="Export a specific signed attempt UUID from job history.")
     compare = commands.add_parser("compare", help="Compare two verified patch candidates from one job.")
     compare.add_argument("job")
     compare.add_argument("first")
     compare.add_argument("second")
-    verify = commands.add_parser("verify", help="Verify a receipt against an independently trusted worker and workflow.")
-    verify.add_argument("receipt", type=Path)
-    verify.add_argument("--worker", required=True, type=Path)
-    verify.add_argument("--workflow", required=True, type=Path)
-    verify.add_argument("--commit", required=True)
-    verify.add_argument("--job")
+    receipt_commands = {"verify": "Verify a receipt against an independently trusted worker and workflow."}
+    if archive_record is not None:
+        receipt_commands["archive"] = "Export a selected verified result for optional Continuum archiving."
+    for name, help_text in receipt_commands.items():
+        command = commands.add_parser(name, help=help_text)
+        command.add_argument("receipt", type=Path)
+        command.add_argument("--worker", required=True, type=Path)
+        command.add_argument("--workflow", required=True, type=Path)
+        command.add_argument("--commit", required=True)
+        command.add_argument("--job")
+        if name == "archive":
+            command.add_argument("--summary", help="Exact excerpt of the signed worker summary to include.")
+            command.add_argument("--include-chat", action="store_true", help="Include the signed worker chat link.")
     commands.add_parser("receive", help=argparse.SUPPRESS).add_argument("member")
     args = parser.parse_args(argv)
     store = ProjectStore(args.state)
@@ -1161,8 +1353,12 @@ def cli(argv, entry, add_key):
         store.information()
         result = store.start(read_json(args.workflow, 256 * 1024), args.commit,
                              read_json(args.brief, 128 * 1024) if args.brief else {}, args.job)
+    elif operation == "list":
+        result = job_list(args.project, args.via, args.limit, store)
     elif operation == "status":
         result = job_status(args.job, args.via, store)
+    elif operation == "history":
+        result = job_history(args.job, args.step, args.via, args.limit, args.before, store)
     elif operation == "work":
         profile = local_profile(read_json(args.profile, 65536))
         remote = connection(store, args.via) if args.via else None
@@ -1180,17 +1376,23 @@ def cli(argv, entry, add_key):
         result = run_worker(store, profile, remote=remote, checkpoint=args.checkpoint)
     elif operation == "approve":
         result = store.approve(args.job, args.step, args.note)
+    elif operation == "abandon":
+        result = store.abandon(args.job, args.step, args.attempt, args.reason)
     elif operation == "requeue":
         result = store.requeue(args.job, args.step)
     elif operation == "brief":
         result = project_brief(store, args.job, args.step)
     elif operation == "result":
-        result = store.result(args.job, args.step)
+        result = store.result(args.job, args.step, attempt=args.attempt)
     elif operation == "compare":
         result = compare_patches(store, args.job, args.first, args.second)
-    elif operation == "verify":
-        result = verify_record(read_json(args.receipt, MAX_RECEIPT), read_json(args.worker, 4096),
-                               read_json(args.workflow, 256 * 1024), args.commit, args.job)
+    elif operation in ("verify", "archive"):
+        receipt = (read_json(args.receipt, MAX_RECEIPT), read_json(args.worker, 4096),
+                   read_json(args.workflow, 256 * 1024), args.commit, args.job)
+        if operation == "archive":
+            result = archive_record(*receipt, summary=args.summary, include_chat=args.include_chat)
+        else:
+            result = verify_record(*receipt)
     elif operation == "receive":
         if os.environ.get("SSH_ORIGINAL_COMMAND") != NAMESPACE:
             raise ValueError("This key is restricted to the Riftwire project protocol.")

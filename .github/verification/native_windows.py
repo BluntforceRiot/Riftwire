@@ -1,6 +1,7 @@
-"""Verify a released Riftwire peer with native Codex on a Windows CI runner."""
+"""Verify Riftwire chat discovery and project work with native Codex."""
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -11,11 +12,14 @@ import sys
 import tempfile
 from threading import Thread
 import time
+from unittest.mock import patch
 
 
 class ResponsesFixture(BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers["Content-Length"]))
+        payload = self.rfile.read(int(self.headers["Content-Length"]))
+        if hasattr(self.server, "requests"):
+            self.server.requests.put((self.path, json.loads(payload)))
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -167,7 +171,137 @@ def verify(codex, archive_script):
                     proc.wait(timeout=5)
 
 
+def verify_project_worker(codex, project_script):
+    spec = importlib.util.spec_from_file_location("riftwire_projects", project_script)
+    projects = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(projects)
+    with tempfile.TemporaryDirectory(prefix="riftwire-worker-") as scratch, ExitStack() as cleanup:
+        base = Path(scratch)
+        codex_home = base / "codex home"
+        codex_home.mkdir()
+        checkout = base / "approved checkout"
+        checkout.mkdir()
+        env = projects.child_environment()
+        env["CODEX_HOME"] = str(codex_home)
+        cleanup.enter_context(patch.dict(os.environ, env, clear=True))
+
+        def git(*args):
+            return subprocess.run([projects.executable("git"), "-C", str(checkout), *args], check=True,
+                                  capture_output=True, text=True, timeout=20).stdout.strip()
+
+        git("init", "-q", "-b", "approved")
+        git("config", "user.name", "Riftwire fixture")
+        git("config", "user.email", "fixture@example.invalid")
+        git("config", "core.autocrlf", "false")
+        git("config", "core.hooksPath", str(base / "empty-hooks"))
+        payload = b"Riftwire native worker fixture\n"
+        (checkout / "source.txt").write_bytes(payload)
+        git("add", "source.txt")
+        git("commit", "-qm", "Approved input")
+        revision = git("rev-parse", "HEAD")
+
+        store = projects.ProjectStore(base / "project state")
+        worker = store.initialize("fixture-worker")
+        repo = "https://example.invalid/fixture/riftwire"
+        definition = {"version": 1, "project": "fixture", "repository": repo, "name": "Worker fixture", "steps": [
+            {"id": "build", "role": "builder", "action": "build", "task": "Build the fixture output.",
+             "artifacts": ["output.bin"]},
+            {"id": "review", "role": "reviewer", "action": "review", "task": "Review the fixture output.",
+             "needs": ["build"]},
+            {"id": "approval", "role": "owner", "action": "approve", "task": "Record fixture approval.",
+             "needs": ["review"]},
+        ]}
+        profile = {"version": 1, "project": "fixture", "repository": repo, "checkout": str(checkout),
+                   "refs": ["refs/heads/approved"]}
+        build = projects.local_profile({**profile, "role": "builder", "actions": {"build": {"command": [
+            sys.executable, "-I", "-B", "-c",
+            "from pathlib import Path\nPath('output.bin').write_bytes(Path('source.txt').read_bytes())",
+        ]}}})
+        review = projects.local_profile({**profile, "role": "reviewer",
+                                         "actions": {"review": {"codex": str(codex), "timeout": 45}}})
+
+        provider = cleanup.enter_context(ThreadingHTTPServer(("127.0.0.1", 0), ResponsesFixture))
+        provider.requests = Queue()
+        Thread(target=provider.serve_forever, daemon=True).start()
+        cleanup.callback(provider.shutdown)
+        native_run = subprocess.run
+
+        def use_fixture_provider(command, *args, **kwargs):
+            if str(command[0]) == str(codex):
+                worker_env = kwargs["env"]
+                assert worker_env.get("CODEX_HOME") == str(codex_home)
+                assert (Path(worker_env["RIFTWIRE_PROJECT_INPUTS"]) / "build" / "output.bin").read_bytes() == payload
+                # Inject only the provider settings for the real Codex executable.
+                options = [
+                    "-c", 'model="riftwire-fixture"', "-c", 'model_provider="fixture"',
+                    "-c", 'model_providers.fixture.name="fixture"', "-c", 'model_providers.fixture.wire_api="responses"',
+                    "-c", f'model_providers.fixture.base_url="http://127.0.0.1:{provider.server_port}/v1"',
+                    "-c", "analytics.enabled=false", "-c", "check_for_update_on_startup=false",
+                ]
+                command = [command[0], *options, *command[1:]]
+                launched = native_run(command, *args, **kwargs)
+                if launched.returncode:
+                    raise AssertionError(Path(kwargs["stdout"].name).read_text(encoding="utf-8", errors="replace")[-4000:])
+                return launched
+            return native_run(command, *args, **kwargs)
+
+        with patch.object(projects.subprocess, "run", side_effect=use_fixture_provider):
+            for outcome in ("passed", "failed"):
+                summary = f"Native worker recorded a {outcome} verdict."
+                provider.fixture_result = json.dumps({"outcome": outcome, "summary": summary})
+                job = store.start(definition, revision, {})["job"]
+                assert projects.run_worker(store, build)["outcome"] == "passed"
+                result = projects.run_worker(store, review)
+                record = store.result(job, "review")
+                assert result["outcome"] == outcome, record["envelope"]["result"]["summary"]
+                assert result["result_sha256"] == projects.object_id(record["envelope"]), result
+                checked = projects.verify_record(record, worker, definition, revision, job)
+                assert checked["outcome"] == outcome, checked
+                digest = projects.sha(payload)
+                assert checked["inputs"] == {"build": {"output.bin": digest}}, checked
+                step = next(item for item in store.status(job)["steps"] if item["id"] == "review")
+                thread_id = record["envelope"]["result"]["chat"]
+                assert step["chat"] == f"codex://threads/{thread_id}" and step["summary"] == summary, step
+                rollouts = list((codex_home / "sessions").rglob(f"rollout-*-{thread_id}.jsonl"))
+                assert len(rollouts) == 1 and summary in rollouts[0].read_text(encoding="utf-8"), step["chat"]
+
+                route, request = provider.requests.get(timeout=5)
+                assert route == "/v1/responses", route
+                assert request["text"]["format"]["schema"] == projects.CODEX_VERDICT_SCHEMA, request.get("text")
+                prompt = json.dumps(request["input"])
+                assert revision in prompt and "output.bin" in prompt
+                approval = next(item for item in store.status(job)["steps"] if item["id"] == "approval")
+                if outcome == "passed":
+                    assert approval["state"] == "needs-approval", approval
+                    store.approve(job, "approval", "Reviewed the fixture receipt.")
+                else:
+                    try:
+                        store.approve(job, "approval", "The failed review must gate approval.")
+                    except ValueError as error:
+                        assert "required checks passed" in str(error), error
+                    else:
+                        raise AssertionError("The failed review allowed approval.")
+
+            git("switch", "-q", "-c", "unapproved")
+            (checkout / "source.txt").write_bytes(b"Unapproved fixture input\n")
+            git("commit", "-qam", "Unapproved input")
+            rejected_revision = git("rev-parse", "HEAD")
+            git("switch", "-q", "approved")
+            rejected = store.start(definition, rejected_revision, {})["job"]
+            assert projects.run_worker(store, build)["outcome"] == "failed"
+            blocked = store.result(rejected, "build")["envelope"]["result"]
+            assert "under a permitted Git ref" in blocked["summary"], blocked
+            assert provider.requests.empty()
+            assert git("status", "--porcelain") == "" and (checkout / "source.txt").read_bytes() == payload
+
+        print("PASS: the native Codex worker persisted both verdicts and signed their artifact inputs. "
+              "The failed verdict gated approval and the worker rejected an unapproved Git revision.")
+
+
 if __name__ == "__main__":
     if os.name != "nt":
         raise SystemExit("Run this verification on a native Windows host.")
-    verify(Path(sys.argv[1]).resolve(strict=True), Path(sys.argv[2]).resolve(strict=True))
+    codex = Path(sys.argv[1]).resolve(strict=True)
+    entry = Path(sys.argv[2]).resolve(strict=True)
+    verify(codex, entry)
+    verify_project_worker(codex, entry.with_name("riftwire_projects.py"))
