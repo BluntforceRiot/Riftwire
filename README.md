@@ -56,6 +56,8 @@ The hub retains accepted messages while the peer is asleep. Riftwire tries to re
 
 The 2.0 preview coordinates work across independent Riftwire installations. Invite a worker into one project, share a workflow file, and collect signed results for the same Git revision. [Project workflow guide](docs/PROJECTS.md)
 
+Guided first-run pairing and a verified two-way exchange are required for 2.0. [Roadmap](docs/ROADMAP.md)
+
 ## Build and license
 
-The runtime is one Python file and uses only the standard library. Run the tests with `python -B -m unittest discover -s tests -v`. Build the release ZIP and its SHA-256 manifest with `python -I -B scripts/build_release.py`. Riftwire is available under the [MIT license](LICENSE).
+The Python runtime uses the standard library. Run the tests with `python -B -m unittest discover -s tests -v`. Build the release ZIP and its SHA-256 manifest with `python -I -B scripts/build_release.py`. Riftwire is available under the [MIT license](LICENSE).

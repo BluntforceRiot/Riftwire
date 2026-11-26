@@ -24,6 +24,7 @@ FILES = (
     "docs/HERMES.md",
     "docs/PROJECTS.md",
     "docs/RELEASE.md",
+    "docs/ROADMAP.md",
     "docs/SETUP.md",
     "examples/verify_release.py",
     "examples/workflows/compare-fixes.json",
