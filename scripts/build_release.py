@@ -11,6 +11,8 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     ".gitattributes",
+    ".github/verification/native_windows.py",
+    ".github/workflows/release.yml",
     ".github/workflows/test.yml",
     ".gitignore",
     "AGENTS.md",
@@ -18,12 +20,14 @@ FILES = (
     "README.md",
     "assets/riftwire-banner.webp",
     "docs/HERMES.md",
+    "docs/RELEASE.md",
     "docs/SETUP.md",
     "riftwire.py",
     "scripts/build_release.py",
     "tests/test_chat_check.py",
     "tests/test_contacts.py",
     "tests/test_hermes.py",
+    "tests/test_network.py",
     "tests/test_riftwire.py",
 )
 

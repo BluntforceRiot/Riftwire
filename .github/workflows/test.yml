@@ -1,6 +1,10 @@
 name: Test and package
 
-on: [push, pull_request]
+on:
+  push:
+    branches-ignore: ['release/v*']
+  pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -26,3 +30,42 @@ jobs:
       - run: python -B -m unittest discover -s tests -v
       - run: python -I -B riftwire.py --version
       - run: python -I -B scripts/build_release.py
+
+  native-windows:
+    name: Native Windows Codex
+    runs-on: windows-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - codex: 0.171.0
+            digest: 4cfd8acd6dd74ccba36393c33b460907e907a8c19051e16a0d0a9783ae0246c5
+          - codex: 0.171.0-alpha.13
+            digest: d5a5ab944b401727aba2983363f45e00702d0437a4cbf9036c7907e3a79cb1b9
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.13'
+      - name: Exercise the local directory in native Codex
+        shell: pwsh
+        env:
+          CODEX_FIXTURE_VERSION: ${{ matrix.codex }}
+          CODEX_FIXTURE_SHA256: ${{ matrix.digest }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fixture = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'riftwire-native')
+          $asset = Join-Path $fixture 'codex-windows.tar.gz'
+          $url = "https://github.com/openai/codex/releases/download/rust-v$env:CODEX_FIXTURE_VERSION/codex-x86_64-pc-windows-msvc.exe.tar.gz"
+          curl.exe --fail --silent --show-error --location --retry 2 --max-time 210 $url --output $asset
+          if ($LASTEXITCODE -ne 0) { throw 'Codex download failed.' }
+          if ((Get-FileHash -Algorithm SHA256 $asset).Hash.ToLowerInvariant() -ne $env:CODEX_FIXTURE_SHA256) { throw 'Unexpected Codex checksum.' }
+          tar.exe -xzf $asset -C $fixture
+          if ($LASTEXITCODE -ne 0) { throw 'Codex extraction failed.' }
+          $codex = @(Get-ChildItem $fixture -Recurse -File | Where-Object { $_.Name -in @('codex.exe','codex-x86_64-pc-windows-msvc.exe') })
+          if ($codex.Count -ne 1) { throw 'Codex fixture is missing or ambiguous.' }
+          python -I -B .github/verification/native_windows.py $codex[0].FullName riftwire.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

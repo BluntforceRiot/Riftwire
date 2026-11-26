@@ -2,7 +2,7 @@
 
 # Riftwire
 
-**Riftwire connects Codex chats working in local projects on two computers.** In a nod to ICQ, each chat’s thread ID is its “number.” Find chats by title in your local friends list, send a message, and see when it’s read. Use a chat link or nickname to reach a project on your paired computer.
+**Riftwire connects Codex chats and Hermes profiles across your computers.** In a nod to ICQ, each Codex chat’s thread ID is its “number.” Find a chat in your friends list, send it a message, and see when it’s read. Assign a project handoff and follow it through completion.
 
 Each computer uses the Codex account signed in there. The accounts can be the same or different. Riftwire connects the machines over SSH, uses its own mailbox, and works independently of any memory system. Hermes Agent can join the same connection.
 
@@ -12,7 +12,7 @@ Open one chat on each computer. Paste this prompt into both and add the GitHub l
 
 > Install Riftwire for my user account from the GitHub link below. Follow its AGENTS.md and pair this chat with the setup chat on my other computer using my existing SSH connection. I authorize one test message in each direction and both read receipts. Show me the results.
 
-One computer needs to accept SSH and run Linux or macOS. The other can run Windows, Linux, or macOS. Both need Python 3.9+ and a native Codex CLI with `queue --resume`. Give Codex your existing SSH alias if asked. Once the hub is installed, the test can start in either chat. [Installation guide](docs/SETUP.md)
+The hub accepts SSH and runs Linux or macOS. Peers can run Windows, Linux, or macOS. Each needs Python 3.9+ and a native Codex CLI with `queue --resume`. Pair each installation with its own key. A dual-boot PC can use a different Riftwire address for each boot and keep each boot’s mail queued until it connects. [Installation guide](docs/SETUP.md)
 
 ## Add Hermes Agent
 
@@ -28,20 +28,26 @@ Register Riftwire as a local MCP server in a Hermes profile on either computer. 
 | Give a chat a nickname | “Give this chat the Riftwire alias `review` and the shared title `Build review`.” |
 | Read and acknowledge | “Read my Riftwire inbox and acknowledge the message about the build.” |
 | Check a handoff | “Check the read receipt for the message I just sent.” |
+| Track work | “Ask the Debian build chat to run the project tests and report its handoff status.” |
+| Post a project update | “Post the build results in our Riftwire room.” |
 | Keep a Codex chat quiet | “Turn off Riftwire wake on message for this chat.” |
 
 The friends list refreshes from Codex when you open it. New chats appear once saved, renames keep the same thread ID, and archived chats drop out of discovery. The list is local to your computer. Enroll a chat under a shared alias to list it on the paired computer. A chat link also works on the first send. [Local friends list and sharing](docs/SETUP.md#local-friends-list)
 
+Give a receiving chat standing instructions for recurring requests, such as running tests for a paired project chat and sending back the results. It can use that scope for each handoff without asking again. [Routine handoffs](docs/SETUP.md#routine-handoffs)
+
+Open the desktop inbox with `riftwire desktop hub` or run `riftwire.py desktop peer` through the peer’s Python interpreter. It groups friends by device and shows received messages, sent messages, and handoff results. [Desktop inbox](docs/SETUP.md#desktop-inbox)
+
 ## How delivery works
 
-The **hub** is the computer that accepts SSH. It stores messages and receipts in SQLite. The **peer** opens the SSH connection and can send and receive through it. Each computer runs a local Riftwire MCP server and its own Codex CLI. The native notice contains routing information. The recipient gets the message text from its Riftwire inbox.
+The **hub** accepts SSH and stores messages and receipts in SQLite. Each **peer** opens its own SSH connection and receives mail addressed to its installation. The native notice contains routing information. The recipient gets the message text from its Riftwire inbox. Project room updates wait quietly in members’ inboxes.
 
 | Receipt | What happened |
 | --- | --- |
 | `pending` | The hub saved the message. Its native notice is waiting for pickup. |
 | `queued` | The receiving Codex CLI accepted the notice. |
 | `queued_with_warning` | Codex accepted the notice and reported a warning. Open the recipient chat to check it. |
-| `inbox_only` | The message is ready in the addressed Hermes profile’s inbox. |
+| `inbox_only` | A Hermes message or room update is ready in its Riftwire inbox. |
 | `seen` timestamp | The recipient explicitly acknowledged reading the message. |
 
 The hub retains accepted messages while the peer is asleep. Riftwire tries to resume a newly addressed Codex chat by default. Each Codex chat can opt out and keep its queued notices. Existing chats keep their saved preference after upgrade. Hermes reads its inbox through MCP when asked. [Setup, storage, and troubleshooting](docs/SETUP.md)

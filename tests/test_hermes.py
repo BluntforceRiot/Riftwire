@@ -78,7 +78,8 @@ class HermesRoutingTests(unittest.TestCase):
                 self.assertIsNone(self.hub.claim(box.side))
                 msg = rw.invoke_hermes(box, "inbox", {}, "hermes")
                 self.assertEqual(msg["messages"][0]["body"], "Codex reply.")
-                self.assertIn("independent instruction from the operator", msg["message_policy"])
+                self.assertEqual(msg["message_policy"], rw.PEER_CORRESPONDENCE)
+                self.assertIn("without asking again", msg["message_policy"])
                 with self.assertRaisesRegex(ValueError, "not found"):
                     rw.invoke_hermes(box, "ack", {"message_id": sent["id"]}, "other")
                 rw.invoke_hermes(box, "ack", {"message_id": sent["id"]}, "hermes")
@@ -111,7 +112,10 @@ class HermesRoutingTests(unittest.TestCase):
         with patch.object(rw.sys, "stdin", io.TextIOWrapper(io.BytesIO(wire))), contextlib.redirect_stdout(responses):
             rw.mcp(lambda name, args, _: rw.invoke_hermes(self.hub, name, args, "hermes"), rw.HERMES_TOOLS)
         tools, contacts = [json.loads(line)["result"] for line in responses.getvalue().splitlines()[1:]]
-        self.assertEqual({row["name"] for row in tools["tools"]}, {"contacts", "send", "inbox", "ack", "receipt"})
+        self.assertEqual({row["name"] for row in tools["tools"]}, {
+            "contacts", "send", "inbox", "ack", "receipt", "outbox",
+            "request_handoff", "handoffs", "update_handoff", "list_rooms", "post_room",
+        })
         for row in tools["tools"]:
             self.assertNotIn("alias", row["inputSchema"]["properties"])
         result = json.loads(contacts["content"][0]["text"])

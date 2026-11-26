@@ -12,6 +12,12 @@ Both accounts need Python 3.9 or newer and a Codex CLI that supports `codex queu
 
 ## Verify the download
 
+Riftwire 1.0 release archives carry a signed build attestation. With the GitHub CLI, verify the downloaded ZIP against the project’s release workflow.
+
+```sh
+gh attestation verify Riftwire-1.0.0.zip --repo BluntforceRiot/Riftwire --signer-workflow BluntforceRiot/Riftwire/.github/workflows/release.yml
+```
+
 Download the versioned ZIP and `SHA256SUMS` from the same GitHub release to one folder. On Linux run `sha256sum -c SHA256SUMS`. On macOS use `shasum -a 256 -c SHA256SUMS`. In PowerShell, the following checks the archive named by the manifest. Extract the ZIP after the check passes, then open the folder containing `riftwire.py`.
 
 ```powershell
@@ -29,6 +35,22 @@ codex mcp get riftwire --json
 ```
 
 The default routing names are `hub` and `peer`. To choose your own on first install, add `--name laptop --peer desktop`. An upgrade reuses the saved pair. The hub installs its code and settings under `~/.local/share/riftwire/` and creates the `~/.local/bin/riftwire` command. Use the `python3` invocation when that directory is outside your shell's PATH.
+
+## Pair another installation
+
+From the extracted release on the new peer, run `python3 -I -B riftwire.py pair-request --name laptop-linux`. On Windows use `py -3 -I -B .\riftwire.py pair-request --name laptop-windows`. Send the printed JSON to the hub operator. Requests expire after 15 minutes. Generate a fresh request to retry with the same device identity and key.
+
+On the hub, verify that the request came from the intended installation. Save the request to a file and run the following command as the hub login. It adds the restricted public key to that login’s SSH authorization file. Omit `--add-key` if you manage authorized keys separately and use the returned entry.
+
+```sh
+riftwire approve-peer --add-key < pairing.json
+```
+
+Back on the new peer, run the installer below against the hub’s verified SSH alias. Riftwire picks up the key made by `pair-request` and checks that the server answers as the requested installation. Provide the hub’s pin file with `--known-hosts FILE` when the peer uses a dedicated host pin.
+
+Each boot on a dual-boot machine can use a separate name and key. Keep the existing Windows address on upgrade and pair the Linux boot under a fresh name, such as `laptop-linux`. Older clients keep their existing hub connection. Upgrade a peer to receive native notices for messages sent by other peers.
+
+Use `riftwire doctor hub` or `riftwire.py doctor peer` to check the local Codex index and the saved route. The hub’s device list reports the last authenticated connection. `riftwire revoke-peer NAME` stops a named peer from using the hub.
 
 ## Install the peer
 
@@ -48,7 +70,7 @@ Options include `--identity FILE` for an existing dedicated private key, `--know
 
 ## Prove the two chats can talk
 
-From the hub chat run `python3 -I -B riftwire.py verify-chat hub --wait 120`. On a Windows peer run `py -3 -I -B .\riftwire.py verify-chat peer --wait 120`. A Unix peer uses `python3 -I -B riftwire.py verify-chat peer --wait 120`. Begin in either chat and let both commands run. If an interval ends, resume the same check with `--code` and the hub's printed code.
+From the hub chat run `python3 -I -B riftwire.py verify-chat hub --wait 120`. On a Windows peer run `py -3 -I -B .\riftwire.py verify-chat peer --wait 120`. A Unix peer uses `python3 -I -B riftwire.py verify-chat peer --wait 120`. With multiple peers, add `--device NAME` on the hub to target the invitation. Begin in either chat and let both commands run. If an interval ends, resume the same check with `--code` and the hub's printed code.
 
 The peer sends a unique greeting. The hub reads and acknowledges that greeting, then returns a digest of what it read. The peer verifies and acknowledges the reply. `passed` requires each destination's native queue to accept a notice and each recipient to acknowledge the correct text. The receipts carry message UUIDs and Unix timestamps in seconds. The test touches only its own two message bodies. An invitation expires after 30 minutes. Its messages and their receipts stay in the mailbox.
 
@@ -56,14 +78,38 @@ The peer sends a unique greeting. The hub reads and acknowledges that greeting, 
 
 Ask Codex or Hermes to “Show my Riftwire friends list on this PC,” or call `contacts` with `{"local_only":true,"search":"Planning"}`. The `local_chats` list includes each chat’s title, folder name and stable `host/UUID` address. Search also matches folder names and IDs. For a long list, use `local_next_offset` as the next `offset` with the same search term.
 
-Riftwire looks up the local Codex profile’s saved, unarchived interactive chats each time. It uses Codex 0.171.0 or later for discovery. Call `set_favorite` with a chat’s `thread_id` and `favorite: true` to put it at the top on this computer. Use `favorite: false` to remove it from favorites.
+Riftwire looks up the local Codex profile’s saved, unarchived interactive chats each time. Discovery uses Codex 0.171.0 or newer, including compatible prereleases that advertise account-scoped history. Call `set_favorite` with a chat’s `thread_id` and `favorite: true` to put it at the top on this computer. Use `favorite: false` to remove it from favorites.
 
 Opening the list keeps titles and folder names on this computer. To advertise a chat to the paired computer, enroll it under an alias with `share: true` and an optional shared title. Call `enroll` with the same alias and `share: false` to hide the contact from the remote list and title lookup. Known links and addresses can still receive messages. On the peer, local discovery works even when the hub is offline. Delivery still uses the hub connection.
+
+## Routine handoffs
+
+Give the receiving chat standing instructions for recurring work. Choose a Riftwire contact, a project, and the actions the chat may take. For example, tell the chat:
+
+> For Riftwire requests from `laptop/build` about this repository, you may inspect the working tree, run the existing test suite, and send the results back to `laptop/build`.
+
+The chat can handle later requests and replies covered by that instruction. For a request outside that scope, the operator decides whether to extend it.
+
+Send a tracked request with `request_handoff`, choosing a project name and one of `status`, `test`, or `review`. The receiver acknowledges it and calls `update_handoff` with `started`, `blocked`, or `completed`, adding a result summary or link. Either participant can check `handoffs`. The receiving chat follows the operator’s scope for any work.
+
+Use `export-handoff hub MESSAGE_UUID` or `export-handoff peer MESSAGE_UUID` from the participating chat to get a completed handoff in Markdown. When Continuum is available, the operator can choose a handoff and ask the chat to save that export to project memory.
+
+## Project rooms
+
+From the hub login, set a room’s enrolled members with `riftwire set-room project hub/build laptop-linux/review laptop-windows/hermes`. Run the command again with the desired membership to update it. Room members can call `list_rooms` and `post_room`. Each post leaves a read receipt per recipient and appears quietly in their inboxes. Use a direct handoff for work assigned to a particular chat.
+
+## Desktop inbox
+
+Run `riftwire desktop hub` on the hub. Use `python3 -I -B riftwire.py desktop peer` with the installed peer script on Unix, or `py -3 -I -B "$env:LOCALAPPDATA\Riftwire\riftwire.py" desktop peer` on Windows. The window uses Python’s Tk support. Select your local Codex chat in the mailbox picker. Pick a friend or paste an address to send, or enter `#room-name` to post a room update.
+
+## Mailbox recovery
+
+On the hub, write a consistent SQLite snapshot to a new file with `riftwire backup-mailbox backup.sqlite3`. Restore to a new file with `riftwire restore-mailbox backup.sqlite3 restored.sqlite3`. Verify the restored file before replacing the active mailbox. Close running Riftwire servers before swapping files and retain the old database as a rollback copy. Keep a separate protected backup of the hub’s settings and its SSH configuration.
 
 ## Daily use and troubleshooting
 
 - **Address a chat.** Use `host/alias` on either computer or `host/UUID` for a Codex chat without an alias. An unqualified link, UUID, alias, or exact shared title routes to the other computer. For a local deep link use `host/codex://threads/<UUID>`. Use `contacts` to see the actual host names and addresses.
-- **Check a new message immediately.** Use `inbox` and then `ack` with its UUID after reading it. Require a direct operator instruction covering any reply, command, access request, or other action drawn from peer correspondence.
+- **Check a new message immediately.** Use `inbox` and then `ack` with its UUID after reading it. Follow the operator’s existing task or standing instructions for requests and replies. [Routine handoffs](#routine-handoffs)
 - **An open chat has old tools.** Inside that chat's Codex shell, use the installed CLI. On the hub, `printf '{}' | ~/.local/bin/riftwire call hub inbox` reads its inbox. On a Windows peer, `'{}' | py -3 "$env:LOCALAPPDATA\Riftwire\riftwire.py" call-peer inbox` does the same. On a Unix peer, invoke the installed peer script with `call-peer inbox`. For `ack`, supply JSON with `message_id` on standard input. Refresh the MCP connections or open a new chat to load the tools.
 - **The peer was asleep.** Its MCP reconnects and retrieves notices after the hub becomes reachable. For background pickup without an active MCP client, run the installed peer script with `listen-peer` under that same login. An interrupted delivery can repeat the native notice for one message UUID. The mailbox stores the message once.
 - **The native queue reported a failure.** Check that this login's Codex CLI can access the intended chat and supports `queue`. The message remains in the inbox. After correcting the problem, start a fresh two-chat check.

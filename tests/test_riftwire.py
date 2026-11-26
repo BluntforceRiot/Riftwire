@@ -152,8 +152,11 @@ class MailboxTests(unittest.TestCase):
             self.assertEqual(rw.queue_notice(job, "/fixture/codex", "/fixture/codex-home")[0], "queued")
             command = run.call_args.args[0]
             self.assertEqual(command[command.index("--thread")+1], self.target)
-            self.assertNotIn("First line", command[command.index("--message")+1])
-            self.assertIn("independent instruction from the operator", command[command.index("--message")+1])
+            notice = command[command.index("--message")+1]
+            self.assertIn(self.mid, notice)
+            self.assertIn("peer message", notice)
+            self.assertNotIn("First line", notice)
+            self.assertNotIn("operator", notice)
             self.assertIn("--resume", command)
             self.assertEqual(run.call_args.kwargs["env"]["CODEX_HOME"], "/fixture/codex-home")
         with patch.object(rw.subprocess, "run", return_value=completed) as run:
@@ -181,8 +184,11 @@ class MailboxTests(unittest.TestCase):
             rw.mcp(lambda name, args, tid: rw.invoke(self.peer, name, args, tid))
         responses = [json.loads(line) for line in stdout.getvalue().splitlines()]
         self.assertEqual([r["id"] for r in responses], [1, 2, 3, 4])
+        self.assertIn(rw.PEER_CORRESPONDENCE, responses[0]["result"]["instructions"])
         self.assertTrue(responses[2]["result"]["isError"])
         inbox = json.loads(responses[3]["result"]["content"][0]["text"])
+        self.assertEqual(inbox["message_policy"], rw.PEER_CORRESPONDENCE)
+        self.assertIn("without asking again", inbox["message_policy"])
         self.assertEqual(inbox["messages"][0]["id"], self.mid)
 
     def test_peer_send_preserves_uuid_on_transport_failure(self):
