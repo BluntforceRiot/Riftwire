@@ -10,7 +10,7 @@ Each computer uses the Codex account signed in there. The accounts can be the sa
 
 Open one chat on each computer. Paste this prompt into both and add the GitHub link to this page at the end.
 
-> Install Riftwire for my user account from the GitHub link below. Follow its AGENTS.md and pair this chat with the setup chat on my other computer using my existing SSH connection. I authorize one test message in each direction and both read receipts. Show me the results.
+> Install Riftwire for my user account from the GitHub link below. Follow its AGENTS.md and pair this chat with the setup chat on my other computer over my existing SSH connection. In 2.0, use guided setup and give me the one invitation to pass between the chats. I authorize one test message in each direction and both read receipts. Show me the results.
 
 The hub accepts SSH and runs Linux or macOS. Peers can run Windows, Linux, or macOS. Each needs Python 3.9+ and a native Codex CLI with `queue --resume`. Pair each installation with its own key. A dual-boot PC can use a different Riftwire address for each boot and keep each boot’s mail queued until it connects. [Installation guide](docs/SETUP.md)
 
@@ -56,7 +56,7 @@ The hub retains accepted messages while the peer is asleep. Riftwire tries to re
 
 The 2.0 preview coordinates work across independent Riftwire installations. Invite a worker into one project, share a workflow file, and collect signed results for the same Git revision. [Project workflow guide](docs/PROJECTS.md)
 
-Guided first-run pairing and a verified two-way exchange are required for 2.0. [Roadmap](docs/ROADMAP.md)
+The 2.0 development build includes one-invitation pairing, automatic per-user pickup on supported systems, and a resumable two-way installation check. [Guided setup](docs/SETUP.md#guided-setup-in-20) · [Release roadmap](docs/ROADMAP.md)
 
 ## Build and license
 

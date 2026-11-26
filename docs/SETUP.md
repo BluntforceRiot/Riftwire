@@ -26,6 +26,32 @@ $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $entry[1]).Hash
 if ($actual -ne $entry[0]) { throw 'Riftwire archive checksum mismatch' }
 ```
 
+## Guided setup in 2.0
+
+Use the same 2.0 build in both setup chats. Run the hub command under the owner of the existing SSH listener and use its login and reachable DNS name or IPv4 address.
+
+```sh
+python3 -I -B riftwire.py setup hub --ssh owner@hub.local --device laptop-linux
+```
+
+On the first run the hub installs its MCP and prints an invitation. On upgrade it takes a checked snapshot of the hub mailbox before migrating it. The invitation includes the hub's Ed25519 public host key from `/etc/ssh/ssh_host_ed25519_key.pub`. Use `--host-key FILE` if the listener uses another Ed25519 key and `--port PORT` if it uses a port other than 22. Get the invitation from the intended hub chat so its host pin comes from a trusted source.
+
+Give the connecting chat that one `invitation` value and run the corresponding command there.
+
+```sh
+python3 -I -B riftwire.py setup peer --invite TOKEN
+```
+
+```powershell
+py -3 -I -B .\riftwire.py setup peer --invite TOKEN
+```
+
+For a new device, the peer generates a dedicated key and uses the pinned SSH connection to the hub owner account for enrollment. Use the owner's existing SSH agent, a default key, or `--owner-identity FILE` for a key in a custom path. Use `--batch` if the owner login already works unattended. For a password or key passphrase, run setup in the peer's native terminal and enter it in OpenSSH's prompt. An already approved named peer uses its existing saved SSH route and key.
+
+The peer registers its MCP and configures pickup at sign-in through systemd user services, Windows Task Scheduler, or macOS launchd. Use `--no-background` to use pickup through MCP and the setup check. A receiver report tells you whether startup is active, configured for the next login, or needs attention. Change the preference later with `riftwire.py receiver enable` or `riftwire.py receiver disable` using the installed peer script. Each chat's wake preference is independent of background pickup. Verify the MCP name printed by setup with `codex mcp get NAME --json`.
+
+Each setup process reads and acknowledges its own fixed test message. `passed` reports the two chat IDs, the native queue result and read timestamp for each message. Use the same local chat to resume. Omit `--invite` on the peer and use `setup hub --resume CODE` on the hub. The hub must stay in setup or resume verification to handle its part of the test. An incomplete invitation expires after 30 minutes. Request a new one for the same device after expiry to keep using its saved identity. Pass the local chat link with `--thread` when running from a terminal without the chat environment.
+
 ## Install the hub
 
 ```sh
@@ -114,6 +140,7 @@ On the hub, write a consistent SQLite snapshot to a new file with `riftwire back
 - **The peer was asleep.** Its MCP reconnects and retrieves notices after the hub becomes reachable. For background pickup without an active MCP client, run the installed peer script with `listen-peer` under that same login. An interrupted delivery can repeat the native notice for one message UUID. The mailbox stores the message once.
 - **The native queue reported a failure.** Check that this login's Codex CLI can access the intended chat and supports `queue`. The message remains in the inbox. After correcting the problem, start a fresh two-chat check.
 - **A send was interrupted.** Retry using the same `message_id`, recipient and text. The hub handles repeated submissions for the same message. A message can hold up to 8 KiB of UTF-8 text.
+- **An unread message went to a different boot.** From the sending Codex chat use `retry_message` with the original message UUID as `message_id` and a verified existing `host/alias` or `host/UUID` as `to`. The new copy has its own receipt with `retry_of` pointing to the original. Riftwire keeps the original receipt and inbox entry. Repeating the same request returns the same copy.
 - **The mailbox reached a limit.** The SSH peer can submit 30 new messages per minute across its Codex and Hermes addresses. Idempotent retries keep the original message. The SQLite mailbox has a 64 MiB growth limit. An existing larger database keeps its allocated pages and history. At the storage limit, back up the mailbox before archiving read history on the hub.
 - **Control wake on message.** A newly addressed or enrolled Codex chat defaults to `wake: true`. Riftwire uses `codex queue --resume` to try to wake the chat. Codex uses the chat’s existing model. Ask Codex to use `set_wake` with `wake: false` to queue notices quietly, or with `wake: true` to resume. Enrollment also accepts `wake`. Omitting it keeps the saved setting. Contacts saved by earlier releases retain their stored setting, which was usually false.
 - **Read a reply in Hermes.** Use the Hermes profile’s `inbox` and `ack` tools. A receipt with `notice: inbox_only` means the reply is stored and available through MCP. [Hermes setup](HERMES.md)
@@ -136,4 +163,4 @@ Choose that key through a dedicated SSH alias or the peer installer's `--identit
 
 Install the new release on the hub first, then on the peer, using the same role and SSH alias. Peer upgrades reuse saved `--identity` and `--known-hosts` files for the connection check and subsequent traffic. Supply the verified file again if an earlier upgrade removed its setting or the file moved. Refresh the MCP connections so existing processes load the new code. The hub retains its SQLite mailbox on upgrade. Use a matching release on both sides for the installation test.
 
-To disconnect, run `codex mcp remove riftwire` on each participating login, close any standalone listener, and reload Codex's MCP connections. The local installation files and existing mailbox remain under their per-user paths. A dedicated SSH public key can be revoked by its owning hub administrator.
+To disconnect, run `receiver disable` through the installed peer script if you configured background pickup. Run `codex mcp remove NAME` on each participating login with its registered Riftwire MCP name, close any standalone listener, and reload Codex's MCP connections. The local installation files and existing mailbox remain under their per-user paths. The hub administrator can revoke a dedicated key with `riftwire revoke-peer NAME`.

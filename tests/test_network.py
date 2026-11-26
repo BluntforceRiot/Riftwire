@@ -1,4 +1,5 @@
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
 import unittest
@@ -27,7 +28,8 @@ class NetworkTests(unittest.TestCase):
         self.hub.approve_device(self.linux_request)
         self.linux = rw.Mailbox(self.path, "peer", self.hosts, device_id=self.linux_request["id"])
         self.chat = str(uuid.uuid4())
-        self.hub.enroll("desk-chat", str(uuid.uuid4()), wake=False)
+        self.hub_thread = str(uuid.uuid4())
+        self.hub.enroll("desk-chat", self.hub_thread, wake=False)
         # A shared UUID still addresses a different chat on each boot.
         self.windows.enroll("work", self.chat, wake=True)
         self.linux.enroll("work", self.chat, wake=False)
@@ -42,6 +44,89 @@ class NetworkTests(unittest.TestCase):
         self.assertEqual(self.hub.contacts()["clients"]["debian/work"], "codex")
         self.linux.record_connection()
         self.assertIsNotNone(self.hub.contacts()["devices"]["debian"]["last_seen"])
+
+    def test_retry_copies_to_the_selected_boot_and_preserves_the_original(self):
+        original = self.hub.send("desk-chat", "windows/work", "Continuum brief")
+        args = {"message_id": original["id"], "to": f"debian/{self.chat}"}
+        copied = rw.invoke(self.hub, "retry_message", args, self.hub_thread)
+        self.assertEqual((copied["recipient"], copied["retry_of"]), ("debian/work", original["id"]))
+        self.assertNotEqual(copied["id"], original["id"])
+        self.assertEqual(self.hub.receipt("desk-chat", original["id"]), original)
+        self.assertEqual(self.hub.outbox("desk-chat")["messages"][0]["retry_of"], original["id"])
+        replay = self.linux.inbox("work")["messages"][0]
+        self.assertEqual((replay["id"], replay["retry_of"], replay["body"]),
+                         (copied["id"], original["id"], "Continuum brief"))
+        self.assertEqual(self.windows.inbox("work")["messages"][0]["id"], original["id"])
+        self.windows.ack("work", original["id"])
+        self.assertEqual(rw.invoke(self.hub, "retry_message", args, self.hub_thread), copied)
+
+    def test_concurrent_retry_is_one_copy_even_after_the_target_gets_an_alias(self):
+        original = self.hub.send("desk-chat", "windows/work", "Queued mail")
+        thread = str(uuid.uuid4())
+        old_alias = self.linux.alias_for(thread)
+        destinations = [f"debian/{thread}", f"debian/{old_alias}",
+                        f"debian/codex://threads/{thread}"]
+
+        def reroute(to):
+            return self.hub.retry_message("desk-chat", original["id"], to)
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            copies = list(pool.map(reroute, destinations))
+        first = copies[0]
+        self.assertEqual(copies, [first] * len(destinations))
+        self.linux.enroll("new-alias", thread)
+        for target in (*destinations, "debian/new-alias"):
+            updated = reroute(target)
+            self.assertEqual(updated["id"], first["id"])
+            self.assertEqual(updated["recipient"], "debian/new-alias")
+        mailbox = self.linux.inbox("new-alias")["messages"]
+        self.assertEqual([entry["id"] for entry in mailbox], [first["id"]])
+
+    def test_retry_requires_the_original_sender_and_an_existing_active_codex_target(self):
+        original = self.hub.send("desk-chat", "windows/work", "Private note")
+        with self.assertRaisesRegex(ValueError, "sent by this chat"):
+            self.windows.retry_message("work", original["id"], "debian/work")
+        with self.assertRaisesRegex(ValueError, "sent by this chat"):
+            rw.invoke(self.hub, "retry_message", {"message_id": original["id"], "to": "debian/work"},
+                      str(uuid.uuid4()))
+        self.linux.bind_hermes("personality")
+        invalid_destinations = (("windows/work", "different Codex chat"),
+                                ("desk/desk-chat", "different Codex chat"),
+                                ("debian/personality", "existing Codex address"),
+                                (f"debian/{uuid.uuid4()}", "existing Codex address"),
+                                ("other/work", "known Riftwire device"),
+                                (self.chat, "existing Codex address"))
+        for target, error in invalid_destinations:
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError, error):
+                self.hub.retry_message("desk-chat", original["id"], target)
+        self.hub.revoke_device("debian")
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            self.hub.retry_message("desk-chat", original["id"], "debian/work")
+        self.assertEqual(len(self.hub.outbox("desk-chat")["messages"]), 1)
+        self.assertNotIn("retry_message", rw.HERMES_TOOLS)
+
+    def test_retry_does_not_copy_read_mail_handoffs_or_room_posts(self):
+        original = self.hub.send("desk-chat", "windows/work", "Already received")
+        self.windows.ack("work", original["id"])
+        handoff = self.hub.request_handoff("desk-chat", "windows/work", "example", "test", "Run the tests")
+        self.hub.set_room("example", ["desk/desk-chat", "windows/work"])
+        room = self.hub.post_room("desk-chat", "example", "A quiet update")["deliveries"][0]
+        for message in (original, handoff, room):
+            with self.subTest(message=message["id"]), self.assertRaisesRegex(ValueError, "unread direct"):
+                self.hub.retry_message("desk-chat", message["id"], "debian/work")
+        self.assertEqual(self.linux.inbox("work")["messages"], [])
+
+    def test_retry_can_finish_an_interrupted_hub_notice_without_copying_again(self):
+        original = self.linux.send("work", "windows/work", "Offline handover")
+        with patch.object(self.linux, "dispatch_hub_message", side_effect=ValueError("Connection interrupted")):
+            with self.assertRaisesRegex(ValueError, "interrupted"):
+                self.linux.retry_message("work", original["id"], "desk/desk-chat")
+        with patch.object(rw, "queue_notice", return_value=("queued", "")) as queue:
+            retry = self.linux.retry_message("work", original["id"], "desk/desk-chat")
+            self.assertEqual(self.linux.retry_message("work", original["id"], "desk/desk-chat"), retry)
+            queue.assert_called_once()
+        self.assertEqual(retry["notice"], "queued")
+        self.assertEqual(len(self.hub.inbox("desk-chat")["messages"]), 1)
 
     def test_legacy_notification_stream_does_not_consume_cross_peer_delivery(self):
         cross = self.linux.send("work", "windows/work", "A note from Debian")

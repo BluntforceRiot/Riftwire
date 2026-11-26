@@ -52,10 +52,11 @@ class HermesRoutingTests(unittest.TestCase):
         self.assertEqual(job["thread"], local_chat)
         self.assertEqual(job["wake"], 1)
         proc = SimpleNamespace(stdout=io.BytesIO((rw.encode(job) + "\n").encode()), stdin=io.BytesIO())
-        settings = {"hosts": self.hosts, "codex": "/fixture/codex", "codex_home": "/fixture/home"}
+        settings = {"hosts": self.hosts, "codex": "/fixture/codex", "codex_home": "/fixture/home",
+                    "mcp_name": "riftwire-hub"}
         with patch.object(rw, "queue_notice", return_value=("queued", "")) as queue:
             self.assertEqual(rw.relay_notice_stream(proc, settings), 1)
-        queue.assert_called_once_with(job, "/fixture/codex", "/fixture/home")
+        queue.assert_called_once_with(job, "/fixture/codex", "/fixture/home", mcp_name="riftwire-hub")
         reply = json.loads(proc.stdin.getvalue())
         self.assertTrue(self.peer.settle("peer", reply["id"], reply["token"], reply["state"], reply["detail"])["recorded"])
         self.assertEqual(rw.invoke_hermes(self.peer, "receipt", {"message_id": local["id"]}, "assistant")["notice"], "queued")
