@@ -130,8 +130,7 @@ def issue(core, box, thread, name, target, port, host_key, code=None):
     destination(target)
     ssh_port(port)
     host_key = core.ed25519_public_key(host_key)
-    with box.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
+    with box.connection(write=True) as db:
         device = db.execute("SELECT id,revoked FROM devices WHERE name=?", (name,)).fetchone()
         if device and device["revoked"] is not None:
             raise ValueError("That device name is revoked. Choose a name for a new installation.")
@@ -158,8 +157,7 @@ def enroll(core, box, code, request):
     require_hub(box)
     code = core.guid(code)
     device_id, name, public_key = core.validate_pair_request(request)
-    with box.connection() as db:
-        db.execute("BEGIN IMMEDIATE")
+    with box.connection(write=True) as db:
         row = invitation_row(db, code)
         if row is None or row["expires"] <= core.timestamp():
             raise ValueError("This setup invitation expired or was not found. Issue a new invitation from the hub chat.")

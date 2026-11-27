@@ -27,7 +27,7 @@ DATA = Path.home() / ".local" / "share" / "riftwire"
 REMOTE_SCRIPT = "~/.local/share/riftwire/riftwire.py"
 ALIAS = re.compile(r"[a-z][a-z0-9-]{0,39}\Z")
 VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
-VERSION = "2.0.0-dev"
+VERSION = "2.0.0-dev.1"
 LEASE = 120
 MAX_BODY = 8192
 MAX_MAILBOX_BYTES = 64 * 1024 * 1024
@@ -263,7 +263,7 @@ class Mailbox:
         self.mcp_name = mcp_name
         self.path = Path(path)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with self.connection(limit_growth=False) as db:
+        with self.connection(initialize=True) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS contacts (
                     address TEXT PRIMARY KEY, host TEXT NOT NULL, thread TEXT NOT NULL,
@@ -364,9 +364,7 @@ class Mailbox:
         if self.side == self.hosts["hub"]:
             return
         now = timestamp()
-        with self.connection() as db:
-            if self.device_id:
-                self.active_device(db)
+        with self.connection(write=True) as db:
             db.execute("""INSERT INTO device_presence VALUES (?,?)
                           ON CONFLICT(name) DO UPDATE SET last_seen=excluded.last_seen
                           WHERE excluded.last_seen >= device_presence.last_seen + 10""", (self.side, now))
@@ -385,8 +383,7 @@ class Mailbox:
         if self.side != self.hosts["hub"]:
             raise ValueError("Approve pairing from the hub login.")
         device_id, name, public_key = validate_pair_request(request)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             self._approve_device(db, device_id, name, public_key)
         return device_id, name, public_key
 
@@ -404,7 +401,7 @@ class Mailbox:
     def revoke_device(self, name):
         if self.side != self.hosts["hub"]:
             raise ValueError("Revoke pairing from the hub login.")
-        with self.connection() as db:
+        with self.connection(write=True) as db:
             count = db.execute("UPDATE devices SET revoked=coalesce(revoked,?) WHERE name=?",
                                (timestamp(), name)).rowcount
             if not count:
@@ -412,15 +409,20 @@ class Mailbox:
         return {"name": name, "revoked": True}
 
     @contextmanager
-    def connection(self, *, limit_growth=True):
+    def connection(self, *, write=False, initialize=False):
         with closing(sqlite3.connect(self.path, timeout=8)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys = ON")
-            if limit_growth:
+            if not initialize:
                 page_size = db.execute("PRAGMA page_size").fetchone()[0]
                 db.execute(f"PRAGMA max_page_count = {MAX_MAILBOX_BYTES // page_size}").fetchone()
             try:
                 with db:
+                    if not initialize and (write or self.device_id):
+                        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                        # Bind peer authorization to the same snapshot as the mailbox operation.
+                        if self.device_id:
+                            self.active_device(db)
                     yield db
             except sqlite3.Error as exc:
                 if getattr(exc, "sqlite_errorname", None) == "SQLITE_FULL" or str(exc) == "database or disk is full":
@@ -438,8 +440,7 @@ class Mailbox:
             raise ValueError("share must be true or false.")
         if title is not None and (not isinstance(title, str) or not title.strip() or len(title) > 160):
             raise ValueError("A shared chat title must be 1 to 160 characters.")
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             bound = db.execute("SELECT thread,client FROM contacts WHERE address=?", (local,)).fetchone()
             if bound and (bound["thread"] != tid or bound["client"] != "codex"):
                 raise ValueError("That address belongs to another chat.")
@@ -481,8 +482,7 @@ class Mailbox:
         return result
 
     def alias_for(self, thread_id):
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             return self.thread_address(db, self.side, guid(thread_id)).split("/", 1)[1]
 
     def codex_alias(self, alias):
@@ -494,8 +494,7 @@ class Mailbox:
     def bind_hermes(self, alias):
         local = hermes_address(self.side, alias)
         identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"urn:riftwire:hermes:{local}"))
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             db.execute("INSERT OR IGNORE INTO contacts (address,host,thread,wake,client,shared) VALUES (?,?,?,0,'hermes',1)",
                        (local, self.side, identity))
             row = db.execute("SELECT client,thread FROM contacts WHERE address=?", (local,)).fetchone()
@@ -506,7 +505,7 @@ class Mailbox:
         local = address(self.side, alias)
         if not isinstance(wake, bool):
             raise ValueError("wake must be true or false.")
-        with self.connection() as db:
+        with self.connection(write=True) as db:
             changed = db.execute("UPDATE contacts SET wake=? WHERE address=? AND client='codex'", (wake, local))
             if changed.rowcount != 1:
                 raise ValueError("Choose an enrolled Codex chat.")
@@ -594,8 +593,7 @@ class Mailbox:
         local = address(self.side, alias)
         mid = guid(message_id) if message_id is not None else str(uuid.uuid4())
         self.validate_text(text)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             to = self.resolve_recipient(db, to)
             if db.execute("SELECT 1 FROM handoff_requests WHERE message_id=?", (mid,)).fetchone():
                 raise ValueError("This ID belongs to a project handoff.")
@@ -612,10 +610,7 @@ class Mailbox:
         if not slash or not ALIAS.fullmatch(host):
             raise ValueError("Use the existing Codex address as host/alias or host/UUID.")
         tid = thread_ref(target)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if self.device_id:
-                self.active_device(db)
+        with self.connection(write=True) as db:
             original = db.execute("""SELECT m.recipient,m.body,m.seen,m.room_post,h.message_id AS handoff
                                      FROM messages m LEFT JOIN handoff_requests h ON h.message_id=m.id
                                      WHERE m.id=? AND m.sender=?""", (original_id, local)).fetchone()
@@ -659,8 +654,7 @@ class Mailbox:
         if not isinstance(project, str) or not ALIAS.fullmatch(project) or action not in HANDOFF_ACTIONS:
             raise ValueError("Use a lowercase project name and one of status, test, or review.")
         self.validate_text(text)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             to = self.resolve_recipient(db, to)
             current = db.execute("SELECT project,action FROM handoff_requests WHERE message_id=?", (mid,)).fetchone()
             if current is not None and tuple(current) != (project, action):
@@ -699,8 +693,7 @@ class Mailbox:
             raise ValueError("Use started, completed, or blocked.")
         if result is not None:
             self.validate_text(result)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             current = db.execute("""SELECT h.state,h.result FROM handoff_requests h
                                    JOIN messages m ON m.id=h.message_id
                                    WHERE m.id=? AND m.recipient=?""", (mid, local)).fetchone()
@@ -721,8 +714,7 @@ class Mailbox:
         members = sorted(set(members))
         if not 2 <= len(members) <= MAX_ROOM_MEMBERS:
             raise ValueError(f"Choose 2 to {MAX_ROOM_MEMBERS} enrolled contacts.")
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             for member in members:
                 row = db.execute("""SELECT 1 FROM contacts c LEFT JOIN devices d ON d.name=c.host
                                     WHERE c.address=? AND d.revoked IS NULL""", (member,)).fetchone()
@@ -743,8 +735,7 @@ class Mailbox:
         local = address(self.side, alias)
         pid = guid(post_id) if post_id is not None else str(uuid.uuid4())
         self.validate_text(text)
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             previous = db.execute("SELECT room,sender,body FROM room_posts WHERE id=?", (pid,)).fetchone()
             if previous is not None:
                 if tuple(previous) != (room, local, text):
@@ -813,7 +804,7 @@ class Mailbox:
 
     def ack(self, alias, message_id):
         local, mid = address(self.side, alias), guid(message_id)
-        with self.connection() as db:
+        with self.connection(write=True) as db:
             changed = db.execute("UPDATE messages SET seen=coalesce(seen,?) WHERE id=? AND recipient=?",
                                  (timestamp(), mid, local)).rowcount
             if not changed:
@@ -841,8 +832,7 @@ class Mailbox:
         tid = guid(thread_id)
         now = timestamp()
         is_hub = self.side == self.hosts["hub"]
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+        with self.connection(write=True) as db:
             if device is not None:
                 target = self.devices(db).get(device)
                 if not is_hub or code or not target or target.get("revoked") or device == self.side:
@@ -885,7 +875,6 @@ class Mailbox:
                 if pairing is not None:
                     if not self.device_id or self.device_id != pairing["device_id"]:
                         raise ValueError("This guided check belongs to a different device or awaits enrollment.")
-                    self.active_device(db)
             if not is_hub and run["peer_thread"] not in (None, tid):
                 raise ValueError("This check belongs to a different peer chat.")
             peer_tid = run["peer_thread"]
@@ -922,10 +911,7 @@ class Mailbox:
             return result
 
     def claim(self, side, mid=None, *, legacy=False):
-        with self.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            if self.device_id:
-                self.active_device(db)
+        with self.connection(write=True) as db:
             row = db.execute("""SELECT m.id,m.sender,m.recipient,c.thread,c.wake FROM messages m
                                 JOIN contacts c ON c.address=m.recipient
                                 JOIN contacts s ON s.address=m.sender
@@ -946,7 +932,7 @@ class Mailbox:
             raise ValueError("Invalid notification result.")
         if not isinstance(detail, str) or len(detail) > 240:
             raise ValueError("Invalid notification detail.")
-        with self.connection() as db:
+        with self.connection(write=True) as db:
             count = db.execute("""UPDATE messages SET notice=?,detail=?,token=NULL,lease_until=0
                                   WHERE id=? AND token=? AND notice='dispatching' AND recipient IN
                                   (SELECT address FROM contacts WHERE host=?)""",

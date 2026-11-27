@@ -12,7 +12,7 @@ Both accounts need Python 3.9 or newer and a Codex CLI that supports `codex queu
 
 ## Verify the download
 
-Riftwire release archives carry a signed build attestation. With the GitHub CLI, verify the downloaded ZIP against the project's release workflow. Substitute your release's archive filename.
+Stable Riftwire releases published by the release workflow carry a signed build attestation. With the GitHub CLI, verify the downloaded stable ZIP against that workflow. Substitute your release's archive filename. For preview builds published with a checksum manifest, use the checksum check below.
 
 ```sh
 gh attestation verify Riftwire-2.0.0.zip --repo BluntforceRiot/Riftwire --signer-workflow BluntforceRiot/Riftwire/.github/workflows/release.yml

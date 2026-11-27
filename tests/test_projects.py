@@ -40,7 +40,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.checkout = self.root / "source"
         self.checkout.mkdir()
         self.git("init", "-q", "--initial-branch=main")
-        (self.checkout / "example.txt").write_text("original\n", encoding="utf-8")
+        (self.checkout / "example.txt").write_bytes(b"original\n")
         self.git("add", "example.txt")
         self.git("-c", "user.email=fixture@example.test", "-c", "user.name=Fixture", "commit", "-qm", "Initial inputs")
         self.commit = self.git("rev-parse", "HEAD")
@@ -203,7 +203,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         winner = links[results.index(assignment)]
         self.assertEqual(winner.call("claim", claim), assignment)
 
-    def test_another_worker_can_apply_the_signed_interruption_checkpoint(self):
+    def test_another_worker_must_approve_the_signed_interruption_checkpoint(self):
         spec = self.definition(self.step("fix", "editor", "patch"))
         remote = ProjectConnection(self.hub, self.other, ["editor"])
         job = self.hub.start(spec, self.commit, {})["job"]
@@ -222,10 +222,21 @@ class ProjectWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no signed result yet"):
             reopened.result(job, "fix")
         resume = self.profile("editor", "patch", "from pathlib import Path\n"
-                              "assert Path('example.txt').read_bytes() == b'preserved\\n'\n"
+                              "assert Path('example.txt').read_text(encoding='utf-8') == 'preserved\\n'\n"
                               "Path('example.txt').write_bytes(b'finished\\n')")
-        completed = projects.run_worker(self.other, resume, remote=remote)
-        self.assertEqual(completed["outcome"], "passed")
+        with mock.patch.object(projects, "run_action") as action:
+            pending = projects.run_worker(self.other, resume, remote=remote)
+            self.assertEqual(pending["status"], "needs-checkpoint-approval")
+            self.assertEqual(pending["checkpoint_result_sha256"], checkpoint["result_sha256"])
+            reviewed_patch = Path(pending["review_directory"]) / "riftwire.patch"
+            self.assertEqual(reviewed_patch.read_bytes(), projects.artifact_bytes(
+                original_receipt["envelope"]["result"]["artifacts"]["riftwire.patch"]))
+            with self.assertRaisesRegex(ValueError, "approval does not match"):
+                projects.run_worker(self.other, resume, remote=remote, approve_checkpoint=projects.sha(b"other"))
+            action.assert_not_called()
+        completed = projects.run_worker(self.other, resume, remote=remote,
+                                        approve_checkpoint=pending["approval_digest"])
+        self.assertEqual(completed["outcome"], "passed", completed.get("summary") or reopened.status(job))
         saved = self.hub.result(job, "fix")["envelope"]["result"]
         self.assertIn(b"+finished", projects.artifact_bytes(saved["artifacts"]["riftwire.patch"]))
         newest = projects.job_history(job, "fix", limit=1, store=reopened)

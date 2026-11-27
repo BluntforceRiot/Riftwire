@@ -26,7 +26,7 @@ class GuidedSetupTests(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory(prefix="riftwire-setup-")
         self.addCleanup(scratch.cleanup)
-        self.folder = Path(scratch.name)
+        self.folder = Path(scratch.name).resolve()
         self.homes = {role: self.folder / role for role in ("hub", "peer")}
         self.profiles = {role: home / ".codex" for role, home in self.homes.items()}
         self.profile_env = {}

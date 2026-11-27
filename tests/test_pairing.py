@@ -142,6 +142,26 @@ class GuidedPairingTests(unittest.TestCase):
             self.assertNotEqual(self.issue()["code"], invite["code"])
         self.assertEqual(self.keys.read_text(encoding="ascii"), self.owner_entry)
 
+    def test_revocation_applies_to_an_already_bound_peer(self):
+        self.hub.approve_device(self.request)
+        peer = rw.Mailbox(self.mailbox, "peer", self.hosts, device_id=self.request["id"])
+        peer.enroll("worker", self.peer_thread)
+        self.hub.enroll("owner", self.hub_thread)
+        sent = self.hub.send("owner", "debian/worker", "A message for the test mailbox.")
+        notice = peer.claim(peer.side)
+        self.assertEqual(peer.inbox("worker")["messages"][0]["id"], sent["id"])
+
+        self.hub.revoke_device(self.request["name"])
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            peer.inbox("worker")
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            peer.ack("worker", sent["id"])
+        with self.assertRaisesRegex(ValueError, "revoked"):
+            peer.settle(peer.side, sent["id"], notice["token"], "queued", "Delivered.")
+        receipt = self.hub.receipt("owner", sent["id"])
+        self.assertIsNone(receipt["seen"])
+        self.assertEqual(receipt["notice"], "dispatching")
+
 
 if __name__ == "__main__":
     unittest.main()

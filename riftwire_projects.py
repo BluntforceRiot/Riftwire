@@ -1060,7 +1060,9 @@ def run_action(assignment, action, checkout, folder, inputs, env):
     return outcome, summary, chat
 
 
-def run_worker(store, profile, *, remote=None, checkpoint=False):
+def run_worker(store, profile, *, remote=None, checkpoint=False, approve_checkpoint=None):
+    if approve_checkpoint is not None:
+        identifier(approve_checkpoint)
     owner = store.information()
     coordinator = remote.invite["coordinator"]["id"] if remote else owner["id"]
     if remote and (remote.invite["project"] != profile["project"] or profile["role"] not in remote.invite["roles"]):
@@ -1075,6 +1077,10 @@ def run_worker(store, profile, *, remote=None, checkpoint=False):
         return {"status": "waiting", "project": profile["project"], "role": profile["role"]}
     assignment = checked_assignment(assigned, owner, coordinator, profile)
     job, attempt, step = assignment["job"], assignment["attempt"], assignment["step"]
+    assignment_digest = object_id(assignment)
+    saved = assignment["checkpoint"]
+    if approve_checkpoint is not None and (not saved or approve_checkpoint != assignment_digest):
+        raise ValueError("The approval does not match this checkpoint assignment.")
     folder = store.root / "work" / (coordinator[:12] + "-" + uuid.UUID(attempt).hex)
     folder.mkdir(mode=0o700, parents=True, exist_ok=True)
     receipt = folder / "result.json"
@@ -1090,7 +1096,7 @@ def run_worker(store, profile, *, remote=None, checkpoint=False):
             if journal.exists():
                 if not checkpoint:
                     return {"status": "interrupted", "job": job, "step": step["id"], "worktree": str(checkout)}
-                if read_json(journal)["assignment"] != object_id(assignment):
+                if read_json(journal)["assignment"] != assignment_digest:
                     raise ValueError("The local work journal belongs to a different assignment.")
                 outcome, summary, chat = "interrupted", "The worker recorded its remaining local changes.", None
                 if (folder / "worker.log").is_file() and "codex" in profile["actions"][step["action"]]:
@@ -1098,7 +1104,14 @@ def run_worker(store, profile, *, remote=None, checkpoint=False):
             else:
                 if checkpoint:
                     raise ValueError("The selected claim has no local work to checkpoint.")
-                write_json(journal, {"assignment": object_id(assignment), "at": int(time.time())})
+                if saved and saved["artifacts"] and approve_checkpoint is None:
+                    review_dir = folder / "checkpoint-review" / assignment_digest
+                    write_artifacts(review_dir, saved["artifacts"])
+                    return {"status": "needs-checkpoint-approval", "job": job, "step": step["id"],
+                            "attempt": attempt, "commit": assignment["commit"],
+                            "checkpoint_result_sha256": saved["result_sha256"],
+                            "review_directory": str(review_dir), "approval_digest": assignment_digest}
+                write_json(journal, {"assignment": assignment_digest, "at": int(time.time())})
                 try:
                     ensure_git_commit(profile, assignment, hooks, env)
                     subprocess.run(git_command(profile["checkout"], hooks, "worktree", "add", "--detach", str(checkout),
@@ -1106,7 +1119,6 @@ def run_worker(store, profile, *, remote=None, checkpoint=False):
                     inputs.mkdir(mode=0o700, exist_ok=True)
                     for name, source in assignment["inputs"].items():
                         write_artifacts(inputs / name, source["artifacts"])
-                    saved = assignment["checkpoint"]
                     if saved:
                         write_artifacts(inputs / "_checkpoint", saved["artifacts"])
                         if "riftwire.patch" in saved["artifacts"] and artifact_bytes(saved["artifacts"]["riftwire.patch"]):
@@ -1123,7 +1135,7 @@ def run_worker(store, profile, *, remote=None, checkpoint=False):
                 if outcome == "interrupted":
                     raise
                 outcome, summary, artifacts = "failed", string(str(error)[:5000], 16384), {}
-            result = {"version": VERSION, "member": owner["id"], "assignment": object_id(assignment),
+            result = {"version": VERSION, "member": owner["id"], "assignment": assignment_digest,
                       "outcome": outcome, "summary": summary, "artifacts": artifacts, "chat": chat}
             envelope = {"result": result, "signature": sign(store.key, result)}
             write_json(receipt, envelope)
@@ -1271,6 +1283,7 @@ def cli(argv, entry, add_key, archive_record=None):
     run_mode = work.add_mutually_exclusive_group()
     run_mode.add_argument("--watch", action="store_true", help="Keep looking for eligible steps.")
     run_mode.add_argument("--checkpoint", action="store_true", help="Report preserved work from an interrupted run.")
+    run_mode.add_argument("--approve-checkpoint", metavar="SHA256", help="Approve this exact checkpoint assignment.")
     brief = commands.add_parser("brief", help="Export selected project context for the next workflow or agent.")
     brief.add_argument("job")
     brief.add_argument("--step", action="append", default=[])
@@ -1372,8 +1385,11 @@ def cli(argv, entry, add_key, archive_record=None):
                 if result != previous:
                     print(canonical(result).decode("ascii"), flush=True)
                     previous = result
+                if result.get("status") == "needs-checkpoint-approval":
+                    return
                 time.sleep(10)
-        result = run_worker(store, profile, remote=remote, checkpoint=args.checkpoint)
+        result = run_worker(store, profile, remote=remote, checkpoint=args.checkpoint,
+                            approve_checkpoint=args.approve_checkpoint)
     elif operation == "approve":
         result = store.approve(args.job, args.step, args.note)
     elif operation == "abandon":
