@@ -18,6 +18,20 @@ The development build implements the invitation, enrollment, receiver setup, two
 - Interrupt setup after enrollment and resume the same pairing. Verify the receiver at the next OS login and confirm two-way delivery with the native Codex chats.
 - Run the setup from ordinary user accounts using the existing SSH listener on the hub. Keep the window for any required initial authentication on the machine where the operator enters it.
 
+### Native delivery verification
+
+On Linux, the packaged verifier uses two disposable Codex profiles, a pinned OpenSSH connection, and a loopback model fixture. Use a regular login with OpenSSH, `ip`, and Python with `websockets` 15 or newer.
+
+```sh
+unshare --user --map-current-user --keep-caps --net \
+  sh -c 'ip link set lo up && python3 -I -B scripts/verify_native_linux.py --codex "$1"' \
+  sh "$(command -v codex)"
+```
+
+The verifier checks that both idle chats start a new turn containing the exact Riftwire notice. It also checks both read receipts and counts the temporary owner SSH logins. A native Codex turn can complete even when the queue reports a warning.
+
+The Windows CI check exercises the native chat directory, project worker, and per-user Task Scheduler registration. Check its scheduler launch result on an interactive Windows login. During the dual-boot check, send a unique message to an idle chat on each boot and let the receiving chat read and acknowledge it. Record the message ID, the intended boot and chat, the new native turn, and the read receipt.
+
 ## Project workflows
 
-The 2.0 development build includes federated workflow invitations, on-demand Codex workers, parallel patches, attempt recovery, and independent release verification. Test the native Windows worker and the live optional Continuum import as part of release qualification. [Project workflows](PROJECTS.md) · [Continuum handoff](CONTINUUM.md)
+The 2.0 development build includes federated workflow invitations, on-demand Codex workers, parallel patches, attempt recovery, and independent release verification. Verify the optional signed archive import when the Continuum adapter is available. [Project workflows](PROJECTS.md) · [Continuum handoff](CONTINUUM.md)

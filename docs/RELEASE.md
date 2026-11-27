@@ -1,9 +1,8 @@
-Riftwire 1.0 brings the local Codex friends list and tracked collaboration to multiple devices.
+Riftwire 2.0 connects Codex chats and Hermes profiles across computers and coordinates project work between them.
 
-- Pair each installation separately. Windows and Linux on the same computer can keep distinct addresses and delivery queues.
-- Search friends in the desktop inbox, read mail and receipts, and see the last connection for each device.
-- Track project requests through receipt, work in progress, and completion. Project rooms let participants share updates quietly.
-- Use guided pairing, connection diagnostics, and checked mailbox snapshots. Export a completed handoff for optional use with Continuum.
-- The wake notice points to the inbox. The receiving chat can follow existing task or standing authorization for requests within that scope.
+- Set up two Codex chats with one invitation over an existing SSH connection. Each boot keeps its own device key and delivery queue. Resume an interrupted setup with the same key and test.
+- The peer can start background pickup at sign-in. Each chat keeps its wake preference. A sender can retry an unread message to a verified address and trace the new receipt back to the original.
+- Assign project work to enrolled workers. Run parallel steps, recover interrupted attempts, verify signed results against the intended Git commit, and record an explicit release approval.
+- Export a selected signed result for an optional Continuum integration. Riftwire handles message delivery and receipts on its own.
 
-Download the ZIP and `SHA256SUMS` and follow the [setup and upgrade guide](https://github.com/BluntforceRiot/Riftwire/blob/v1.0.0/docs/SETUP.md). The release package carries a signed GitHub build attestation.
+Download the ZIP and `SHA256SUMS`, verify the GitHub build attestation, and install the hub first. Use the same release on both machines. [Setup and upgrade guide](https://github.com/BluntforceRiot/Riftwire/blob/v2.0.0/docs/SETUP.md) · [Project workflows](https://github.com/BluntforceRiot/Riftwire/blob/v2.0.0/docs/PROJECTS.md)

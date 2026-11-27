@@ -1,5 +1,6 @@
-"""Verify Riftwire chat discovery and project work with native Codex."""
+"""Verify native Windows Codex integration and background pickup."""
 from contextlib import ExitStack
+from hashlib import sha256
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
@@ -13,6 +14,13 @@ import tempfile
 from threading import Thread
 import time
 from unittest.mock import patch
+
+
+def load_module(path):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class ResponsesFixture(BaseHTTPRequestHandler):
@@ -172,9 +180,7 @@ def verify(codex, archive_script):
 
 
 def verify_project_worker(codex, project_script):
-    spec = importlib.util.spec_from_file_location("riftwire_projects", project_script)
-    projects = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(projects)
+    projects = load_module(project_script)
     with tempfile.TemporaryDirectory(prefix="riftwire-worker-") as scratch, ExitStack() as cleanup:
         base = Path(scratch)
         codex_home = base / "codex home"
@@ -298,10 +304,128 @@ def verify_project_worker(codex, project_script):
               "The failed verdict gated approval and the worker rejected an unapproved Git revision.")
 
 
+TASK_QUERY = r"""
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$scheduler = New-Object -ComObject 'Schedule.Service'
+$scheduler.Connect()
+$root = $scheduler.GetFolder('\')
+$job = $root.GetTasks(1) | Where-Object { $_.Name -eq $env:RIFTWIRE_TEST_TASK }
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$groups = @($identity.Groups | ForEach-Object { $_.Value })
+$data = @{ present = [bool]$job; interactive = ('S-1-5-4' -in $groups -or 'S-1-5-14' -in $groups) }
+function AccountSid([string]$account) {
+    if ($account -match '^S-[0-9]+-') { return $account }
+    return ([Security.Principal.NTAccount]::new($account)).Translate([Security.Principal.SecurityIdentifier]).Value
+}
+if ($job) {
+    $definition = $job.Definition
+    $trigger = $definition.Triggers.Item(1)
+    $action = $definition.Actions.Item(1)
+    $data.current_user = ((AccountSid $definition.Principal.UserId) -eq $identity.User.Value)
+    $data.current_user_trigger = ((AccountSid $trigger.UserId) -eq $identity.User.Value)
+    $data.trigger = [int]$trigger.Type
+    $data.trigger_count = $definition.Triggers.Count
+    $data.action_count = $definition.Actions.Count
+    $data.action = [int]$action.Type
+    $data.logon = [int]$definition.Principal.LogonType
+    $data.level = [int]$definition.Principal.RunLevel
+    $data.program = $action.Path
+    $data.arguments = $action.Arguments
+    $data.enabled = $job.Enabled
+}
+ConvertTo-Json -InputObject $data -Compress
+"""
+
+
+RECEIVER_FIXTURE = """import json
+import os
+from pathlib import Path
+import sys
+import time
+
+folder = Path(__file__).resolve().parent
+assert sys.argv[1:] == ['listen-peer', '--folder', str(folder)]
+settings = json.loads((folder / 'settings.json').read_bytes())
+started = folder / ('started-' + str(settings['generation']))
+staged = started.with_suffix('.tmp')
+staged.write_text(str(os.getpid()), encoding='ascii')
+staged.replace(started)
+time.sleep(40)
+"""
+
+
+def verify_receiver(archive_script):
+    core = load_module(archive_script)
+    receiver = load_module(archive_script.with_name("riftwire_receiver.py"))
+    powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    with tempfile.TemporaryDirectory(prefix="riftwire task 100% ") as scratch:
+        folder = Path(scratch).resolve()
+        identifier = sha256(os.fsencode(os.path.normcase(folder))).hexdigest()[:24]
+        env = {**os.environ, "RIFTWIRE_TEST_TASK": "riftwire-peer-" + identifier}
+        settings = folder / "settings.json"
+        script = folder / "riftwire.py"
+        script.write_text(RECEIVER_FIXTURE, encoding="utf-8")
+        core.safe_write(settings, b'{"generation":1}', 0o600)
+
+        def probe():
+            result = receiver.command([str(powershell), "-NoProfile", "-NonInteractive", "-Command", TASK_QUERY], env=env)
+            return json.loads(result.stdout)
+
+        def ensure(enabled=True):
+            return receiver.ensure(folder, enabled, write=core.safe_write, lock=core.receiver_lock)
+
+        def started_pid(generation):
+            entry = folder / f"started-{generation}"
+            deadline = time.monotonic() + 12
+            while time.monotonic() < deadline:
+                if entry.exists():
+                    return int(entry.read_text(encoding="ascii"))
+                time.sleep(0.15)
+            return None
+
+        assert not probe()["present"], "The disposable task name is already in use."
+        try:
+            status = ensure()
+            assert status["provider"] == "windows-task" and status["state"] in ("running", "configured"), status
+            job = probe()
+            assert job["present"] and job["enabled"], job
+            assert job["current_user"] and job["current_user_trigger"], job
+            assert (job["logon"], job["level"], job["trigger"], job["trigger_count"]) == (3, 0, 9, 1), job
+            assert (job["action"], job["action_count"]) == (0, 1), job
+            python = Path(sys.executable)
+            pythonw = python.with_name("pythonw.exe")
+            assert Path(job["program"]) == (pythonw if pythonw.is_file() else python), job
+            arguments = ["-I", "-B", str(script), "listen-peer", "--folder", str(folder)]
+            assert job["arguments"] == subprocess.list2cmdline(arguments), job
+            print("PASS: Windows registered the disposable receiver's current-user logon task with limited privileges.")
+
+            first = started_pid(1)
+            if first is None:
+                assert not job["interactive"], "An interactive runner did not launch the receiver fixture."
+                print("SKIP: No receiver process was observed on this runner with a noninteractive token.")
+            else:
+                core.safe_write(settings, b'{"generation":2}', 0o600)
+                upgraded = ensure()
+                assert upgraded["state"] in ("running", "configured"), upgraded
+                after = started_pid(2)
+                assert after is not None and after != first, "Updated receiver did not start a new process."
+                print("PASS: Windows started the scheduled receiver and ran updated settings in a new process.")
+        finally:
+            disabled = ensure(False)
+            assert disabled["state"] == "disabled", disabled
+            assert not probe()["present"] and settings.is_file()
+            print("PASS: Windows removed the disposable scheduled task and retained the peer settings.")
+
+
 if __name__ == "__main__":
     if os.name != "nt":
         raise SystemExit("Run this verification on a native Windows host.")
-    codex = Path(sys.argv[1]).resolve(strict=True)
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: native_windows.py <codex.exe|--receiver-only> riftwire.py")
     entry = Path(sys.argv[2]).resolve(strict=True)
-    verify(codex, entry)
-    verify_project_worker(codex, entry.with_name("riftwire_projects.py"))
+    if sys.argv[1] != "--receiver-only":
+        codex = Path(sys.argv[1]).resolve(strict=True)
+        verify(codex, entry)
+        verify_project_worker(codex, entry.with_name("riftwire_projects.py"))
+    verify_receiver(entry)

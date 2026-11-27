@@ -1552,8 +1552,10 @@ def register(folder, settings, mode, install_cli=False, *, allow_alternate=False
     destination = folder / "riftwire.py"
     command = [sys.executable, "-I", "-B", str(destination)] + mode
     codex = settings["codex"]
+    codex_home = settings.get("codex_home")
+    env = {**os.environ, "CODEX_HOME": codex_home} if codex_home else None
     # Inspect metadata locally so an unrelated existing registration cannot be replaced.
-    listed = subprocess.run([codex, "mcp", "list", "--json"], capture_output=True, check=True, timeout=20)
+    listed = subprocess.run([codex, "mcp", "list", "--json"], capture_output=True, check=True, timeout=20, env=env)
     servers = {entry["name"]: entry for entry in json.loads(listed.stdout)}
 
     def matches(server):
@@ -1593,7 +1595,7 @@ def register(folder, settings, mode, install_cli=False, *, allow_alternate=False
         settings["mcp_name"] = mcp_name
     safe_write(folder / "settings.json", (encode(settings) + "\n").encode(), 0o600)
     if not existing or existing["transport"].get("command") != command[0]:
-        subprocess.run([codex, "mcp", "add", mcp_name, "--", *command], check=True, timeout=30)
+        subprocess.run([codex, "mcp", "add", mcp_name, "--", *command], check=True, timeout=30, env=env)
     if install_cli:
         link.parent.mkdir(parents=True, exist_ok=True)
         if not link.is_symlink():
@@ -1601,12 +1603,16 @@ def register(folder, settings, mode, install_cli=False, *, allow_alternate=False
     print(f"Riftwire installed in {folder}. MCP entry: {mcp_name}.")
 
 
-def native_settings(executable=None):
+def native_settings(executable=None, *, saved_codex_home=None):
     codex = codex_path(executable)
-    queue_help = subprocess.run([codex, "queue", "--help"], capture_output=True, timeout=15)
+    current = os.environ.get("CODEX_HOME")
+    codex_home = Path(saved_codex_home or current or Path.home() / ".codex").expanduser().resolve()
+    if saved_codex_home and current and Path(current).expanduser().resolve() != codex_home:
+        raise ValueError(f"This Riftwire installation uses Codex home {codex_home}. Resume setup with that CODEX_HOME.")
+    env = {**os.environ, "CODEX_HOME": str(codex_home)}
+    queue_help = subprocess.run([codex, "queue", "--help"], capture_output=True, timeout=15, env=env)
     if queue_help.returncode or not all(flag in queue_help.stdout for flag in (b"--thread", b"--message", b"--resume")):
         raise ValueError("Update the native Codex CLI for this account. Riftwire needs queue --thread, --message, and --resume.")
-    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     return {"codex": codex, "codex_home": str(codex_home)}
 
 
@@ -1617,8 +1623,9 @@ def openssh_path():
     return ssh
 
 
-def install(args):
-    codex_settings = native_settings(args.codex)
+def install(args, *, codex_settings=None):
+    if codex_settings is None:
+        codex_settings = native_settings(args.codex)
     if args.mode == "install-hub":
         defaults = read_settings(DATA)["hosts"] if (DATA / "settings.json").exists() else {"hub": "hub", "peer": "peer"}
         hosts = {"hub": args.name or defaults["hub"], "peer": args.peer or defaults["peer"]}
@@ -1651,11 +1658,13 @@ def install(args):
                 flag = option.replace("_", "-")
                 raise ValueError(f"The SSH file for --{flag} is unavailable. Supply a verified replacement.")
             settings[option] = str(path)
-    configure_peer(folder, settings, previous, pending, peer_call(settings, "check"))
+    apply_peer_endpoint(settings, previous, pending, peer_call(settings, "check"))
+    register_peer(folder, settings)
 
 
-def configure_peer(folder, settings, previous, pending, checked, *, guided=False):
-    if checked.get("service") != "riftwire" or checked.get("version") not in (1, 2) or checked.get("role") != "peer":
+def apply_peer_endpoint(settings, previous, pending, checked):
+    if (not isinstance(checked, dict) or checked.get("service") != "riftwire"
+            or checked.get("version") not in (1, 2) or checked.get("role") != "peer"):
         raise ValueError("The SSH host did not return the expected Riftwire endpoint.")
     hosts = checked.get("hosts")
     if (not isinstance(hosts, dict) or set(hosts) != {"hub", "peer"}
@@ -1674,6 +1683,9 @@ def configure_peer(folder, settings, previous, pending, checked, *, guided=False
         raise ValueError("A different Riftwire installation is bound to this SSH key.")
     if checked.get("notice_format") == NOTICE_FORMAT:
         settings["notice_format"] = NOTICE_FORMAT
+
+
+def register_peer(folder, settings, *, guided=False):
     if guided:
         register(folder, settings, ["mcp-peer"], allow_alternate=True)
     else:

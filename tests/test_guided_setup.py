@@ -28,6 +28,8 @@ class GuidedSetupTests(unittest.TestCase):
         self.addCleanup(scratch.cleanup)
         self.folder = Path(scratch.name)
         self.homes = {role: self.folder / role for role in ("hub", "peer")}
+        self.profiles = {role: home / ".codex" for role, home in self.homes.items()}
+        self.profile_env = {}
         self.codex = {role: self.homes[role] / "codex" for role in self.homes}
         self.threads = {role: str(uuid.uuid4()) for role in self.homes}
         self.registrations = {role: {} for role in self.homes}
@@ -48,6 +50,7 @@ class GuidedSetupTests(unittest.TestCase):
         self.owner_calls = 0
         self.queue_calls = []
         self.fail_peer_registration = False
+        self.drop_owner_reply = False
         patches = (
             patch.object(rw, "DATA", self.hub),
             patch.object(rw.os, "umask"),
@@ -62,13 +65,17 @@ class GuidedSetupTests(unittest.TestCase):
 
     def chat_directory(self, executable, codex_home):
         role = next(role for role, path in self.codex.items() if str(path) == executable)
-        self.assertEqual(codex_home, str(self.homes[role] / ".codex"))
+        self.assertEqual(codex_home, str(self.profiles[role]))
         return {self.threads[role]: {"title": "Setup", "folder": "Fixture"}}
 
     def run_cli(self, role, args, payload=b"", original_command=None):
         home = self.homes[role]
-        env = {**os.environ, "HOME": str(home), "CODEX_HOME": str(home / ".codex"),
+        env = {**os.environ, "HOME": str(home),
                "XDG_DATA_HOME": str(home / ".local/share"), "CODEX_THREAD_ID": self.threads[role]}
+        env.pop("CODEX_HOME", None)
+        profile = self.profile_env.get(role, self.profiles[role])
+        if profile is not None:
+            env["CODEX_HOME"] = str(profile)
         env.pop("SSH_ORIGINAL_COMMAND", None)
         if original_command is not None:
             env["SSH_ORIGINAL_COMMAND"] = original_command
@@ -112,11 +119,11 @@ class GuidedSetupTests(unittest.TestCase):
 
     def codex_command(self, role, args, options):
         command = args[1:]
+        self.assertEqual(options["env"]["CODEX_HOME"], str(self.profiles[role]))
         if command == ["queue", "--help"]:
             return subprocess.CompletedProcess(args, 0, b"--thread --message --resume", b"")
         if command[0] == "queue":
             self.assertEqual(command[command.index("--thread") + 1], self.threads[role])
-            self.assertEqual(options["env"]["CODEX_HOME"], str(self.homes[role] / ".codex"))
             self.queue_calls.append((role, "--resume" in command, command[command.index("--message") + 1]))
             return subprocess.CompletedProcess(args, 0, b"queued", b"")
         records = self.registrations[role]
@@ -154,7 +161,11 @@ class GuidedSetupTests(unittest.TestCase):
         if identity == self.owner_key:
             self.owner_calls += 1
             self.assertEqual(remote, ["setup-enroll"])
-            return self.run_cli("hub", remote, payload)
+            completed = self.run_cli("hub", remote, payload)
+            if self.drop_owner_reply and completed.returncode == 0:
+                self.drop_owner_reply = False
+                return subprocess.CompletedProcess(args, 255, b"", b"Connection interrupted after approval")
+            return completed
         if identity is not None:
             key = identity.read_text(encoding="ascii").strip()
             for line in self.authorized.read_text(encoding="ascii").splitlines():
@@ -289,6 +300,70 @@ class GuidedSetupTests(unittest.TestCase):
         refused = self.peer_setup(invite["invitation"])
         self.assertIn(b"A different guided SSH route is already saved", refused.stderr)
         self.assertEqual(Path(rw.read_settings(self.peer)["known_hosts"]).read_bytes(), saved_pin)
+
+    def test_repair_snapshots_existing_hub_and_preserves_its_codex_profile(self):
+        self.profiles["hub"] = self.homes["hub"] / "custom profile"
+        original = self.run_cli("hub", ["install-hub", "--codex", str(self.codex["hub"])])
+        self.assertEqual(original.returncode, 0, original.stderr.decode())
+        box = self.hub_mailbox()
+        sent = rw.invoke(box, "send", {"to": self.threads["peer"], "text": "Keep the mailbox on repair."},
+                         self.threads["hub"])
+        (self.hub / "riftwire.py").unlink()
+        self.registrations["hub"].clear()
+        self.profile_env["hub"] = None
+        repaired = self.hub_setup()
+        backup = self.report(repaired, "mailbox")
+        snapshot = rw.Mailbox(backup["mailbox"], "hub", box.hosts)
+        self.assertEqual(rw.invoke(snapshot, "receipt", {"message_id": sent["id"]}, self.threads["hub"]), sent)
+        self.assertEqual(rw.read_settings(self.hub)["codex_home"], str(self.profiles["hub"]))
+        self.assertIn("riftwire", self.registrations["hub"])
+        self.assertTrue((self.hub / "riftwire.py").is_file())
+        code = self.report(repaired, "invitation")["code"]
+        self.profile_env["hub"] = self.homes["hub"] / "unrelated profile"
+        refused = self.setup("hub", "--resume", code)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn(b"Resume setup with that CODEX_HOME", refused.stderr)
+        self.assertEqual(rw.read_settings(self.hub)["codex_home"], str(self.profiles["hub"]))
+
+    def test_dedicated_resume_saves_proof_and_profile_before_registration(self):
+        self.profiles["peer"] = self.homes["peer"] / "custom profile"
+        token = self.report(self.hub_setup(), "invitation")["invitation"]
+        self.drop_owner_reply = True
+        first = self.peer_setup(token)
+        self.assertEqual(first.returncode, 1)
+        self.assertIn(b"interrupted after approval", first.stderr)
+        progress = self.peer / "guided-setup.json"
+        self.assertFalse(json.loads(progress.read_bytes())["authenticated"])
+        self.profile_env["peer"] = None
+        with patch.object(rw, "register_peer", side_effect=OSError("Registration interrupted before saving")):
+            resumed = self.peer_setup()
+        self.assertEqual(resumed.returncode, 1)
+        self.assertIn(b"Registration interrupted before saving", resumed.stderr)
+        self.assertFalse((self.peer / "settings.json").exists())
+        saved = json.loads(progress.read_bytes())
+        self.assertTrue(saved["authenticated"])
+        self.assertEqual(saved["codex_home"], str(self.profiles["peer"]))
+        self.assertEqual(self.owner_calls, 1)
+        self.report(self.peer_setup(), "receipts")
+        self.assertEqual(rw.read_settings(self.peer)["codex_home"], str(self.profiles["peer"]))
+        self.assertEqual(self.owner_calls, 1)
+        self.assertEqual(self.generated_keys, 1)
+
+    def test_guided_setup_refuses_a_symlink_in_its_managed_pin_path(self):
+        token = self.report(self.hub_setup(), "invitation")["invitation"]
+        redirected = self.folder / "outside-pin"
+        original = f"[fixture.invalid]:2208 {public_key(2)}\n".encode("ascii")
+        redirected.write_bytes(original)
+        self.peer.mkdir(parents=True)
+        pin = self.peer / "setup_known_hosts"
+        pin.symlink_to(redirected)
+        refused = self.peer_setup(token)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn(b"The guided SSH pin path must contain a regular file", refused.stderr)
+        self.assertTrue(pin.is_symlink())
+        self.assertEqual(redirected.read_bytes(), original)
+        self.assertEqual(self.generated_keys, 0)
+        self.assertEqual(self.owner_calls, 0)
 
 
 if __name__ == "__main__":

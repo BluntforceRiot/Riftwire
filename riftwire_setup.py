@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import stat
 import subprocess
 import tempfile
 from types import SimpleNamespace
@@ -48,14 +49,16 @@ def setup_hub(core, pairing, args, tid):
         previous = core.read_settings(folder) if (folder / "settings.json").exists() else {}
         if args.resume and not previous:
             raise ValueError("Resume on the hub login that issued the invitation.")
+        codex_settings = core.native_settings(args.codex or previous.get("codex"),
+                                              saved_codex_home=previous.get("codex_home"))
         mailbox = folder / "mail.sqlite3"
         installed = folder / "riftwire.py"
-        if mailbox.is_file() and installed.is_file() and installed.read_bytes() != Path(core.__file__).read_bytes():
+        if mailbox.is_file() and (not installed.is_file() or installed.read_bytes() != Path(core.__file__).read_bytes()):
             backup = Path(tempfile.mkdtemp(prefix="pre-guided-upgrade-", dir=folder))
             snapshot = core.copy_mailbox(mailbox, backup / "mail.sqlite3")
             core.output({"state": "mailbox_backed_up", **snapshot})
-        core.install(SimpleNamespace(mode="install-hub", name=None, peer=None,
-                                     codex=args.codex or previous.get("codex"), allow_alternate=True))
+        core.install(SimpleNamespace(mode="install-hub", name=None, peer=None, allow_alternate=True),
+                     codex_settings=codex_settings)
         settings = core.read_settings(folder)
         invite = pairing.issue(core, hub_mailbox(core, settings), tid, name, target, port, host_key, code=args.resume)
     core.output({"state": "invited", "code": invite["code"], "invitation": pairing.encode_invitation(invite),
@@ -91,7 +94,12 @@ def pinned_route(core, pairing, folder, invite, *, replace_draft=False):
     marker = host if port == 22 else f"[{host}]:{port}"
     pin = folder / "setup_known_hosts"
     data = f"{marker} {invite['host_key']}\n".encode("ascii")
-    prior = pin.read_bytes() if pin.exists() else None
+    try:
+        if not stat.S_ISREG(pin.lstat().st_mode):
+            raise ValueError("The guided SSH pin path must contain a regular file.")
+        prior = pin.read_bytes()
+    except FileNotFoundError:
+        prior = None
     if prior is not None and prior != data and not replace_draft:
         raise ValueError("The invitation differs from the saved SSH host pin.")
     if prior != data:
@@ -118,7 +126,8 @@ def prepare_peer(core, pairing, folder, args, tid):
     if tid == invite["thread"]:
         raise ValueError("Use a distinct peer chat for the two-chat check.")
 
-    settings = core.native_settings(args.codex or previous.get("codex"))
+    settings = core.native_settings(args.codex or previous.get("codex") or saved.get("codex"),
+                                    saved_codex_home=previous.get("codex_home") or saved.get("codex_home"))
     settings["ssh_program"] = core.openssh_path()
     background = args.background if args.background is not None else saved.get("background", True)
     pending = None
@@ -135,7 +144,8 @@ def prepare_peer(core, pairing, folder, args, tid):
         settings["identity"] = str((folder / "pairing_ed25519").resolve())
 
     def save_progress(bound):
-        state = {"invitation": token, "peer_thread": tid, "background": background, "authenticated": bound}
+        state = {"invitation": token, "peer_thread": tid, "background": background, "authenticated": bound,
+                 "codex": settings["codex"], "codex_home": settings["codex_home"]}
         core.safe_write(progress, (core.encode(state) + "\n").encode("ascii"), 0o600)
 
     save_progress(authenticated)
@@ -148,10 +158,14 @@ def prepare_peer(core, pairing, folder, args, tid):
             raise ValueError("The invitation expired before enrollment. Request a fresh invitation from the same hub.") from None
         owner_enroll(core, settings, invite, pending, args)
         save_progress(True)
+        authenticated = True
         checked = core.peer_call(settings, "check")
     if not isinstance(checked, dict) or checked.get("release") != core.VERSION:
         raise ValueError(f"Install Riftwire {core.VERSION} on the hub before finishing guided setup.")
-    core.configure_peer(folder, settings, previous, pending, checked, guided=True)
+    core.apply_peer_endpoint(settings, previous, pending, checked)
+    if not authenticated:
+        save_progress(True)
+    core.register_peer(folder, settings, guided=True)
     return invite, settings, background
 
 

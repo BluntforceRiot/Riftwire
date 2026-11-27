@@ -36,6 +36,7 @@ FILES = (
     "riftwire_receiver.py",
     "riftwire_setup.py",
     "scripts/build_release.py",
+    "scripts/verify_native_linux.py",
     "scripts/verify_project_link.py",
     "tests/test_chat_check.py",
     "tests/test_contacts.py",

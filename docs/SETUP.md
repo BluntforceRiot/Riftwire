@@ -12,10 +12,10 @@ Both accounts need Python 3.9 or newer and a Codex CLI that supports `codex queu
 
 ## Verify the download
 
-Riftwire 1.0 release archives carry a signed build attestation. With the GitHub CLI, verify the downloaded ZIP against the project’s release workflow.
+Riftwire release archives carry a signed build attestation. With the GitHub CLI, verify the downloaded ZIP against the project's release workflow. Substitute your release's archive filename.
 
 ```sh
-gh attestation verify Riftwire-1.0.0.zip --repo BluntforceRiot/Riftwire --signer-workflow BluntforceRiot/Riftwire/.github/workflows/release.yml
+gh attestation verify Riftwire-2.0.0.zip --repo BluntforceRiot/Riftwire --signer-workflow BluntforceRiot/Riftwire/.github/workflows/release.yml
 ```
 
 Download the versioned ZIP and `SHA256SUMS` from the same GitHub release to one folder. On Linux run `sha256sum -c SHA256SUMS`. On macOS use `shasum -a 256 -c SHA256SUMS`. In PowerShell, the following checks the archive named by the manifest. Extract the ZIP after the check passes, then open the folder containing `riftwire.py`.
